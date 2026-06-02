@@ -1,0 +1,169 @@
+using System.Xml.Linq;
+using DnnManager.Application.Abstractions;
+using DnnManager.Domain;
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Logging;
+
+namespace DnnManager.Infrastructure.WebConfigs;
+
+public sealed class WebConfigService : IWebConfigService
+{
+    private readonly ILogger<WebConfigService> _log;
+
+    public WebConfigService(ILogger<WebConfigService> log) => _log = log;
+
+    public Result<SiteSqlConnection> ReadSiteSqlServer(string webConfigPath)
+    {
+        try
+        {
+            if (!File.Exists(webConfigPath))
+                return Result<SiteSqlConnection>.Fail($"web.config not found: {webConfigPath}");
+
+            var doc = XDocument.Load(webConfigPath, LoadOptions.PreserveWhitespace);
+            var add = FindConnectionStringElement(doc, webConfigPath, out var sourcePath);
+            if (add is null)
+                return Result<SiteSqlConnection>.Fail(
+                    $"connectionStrings/add[@name='SiteSqlServer'] not found in {sourcePath}.");
+
+            var raw = (string?)add.Attribute("connectionString");
+            if (string.IsNullOrWhiteSpace(raw))
+                return Result<SiteSqlConnection>.Fail($"SiteSqlServer connectionString attribute is empty in {sourcePath}.");
+
+            // SqlConnectionStringBuilder accepts both 'Server'/'Data Source' and 'Database'/'Initial Catalog' aliases.
+            SqlConnectionStringBuilder b;
+            try { b = new SqlConnectionStringBuilder(raw); }
+            catch (Exception ex)
+            {
+                return Result<SiteSqlConnection>.Fail($"Failed to parse SiteSqlServer connection string: {ex.Message}. Value: {raw}");
+            }
+
+            if (string.IsNullOrWhiteSpace(b.DataSource) || string.IsNullOrWhiteSpace(b.InitialCatalog))
+            {
+                // Common DNN template case: AttachDBFilename / LocalDB / User Instance — there's no
+                // real SQL Server database here so cloning isn't possible until the site is wired
+                // up to a proper DB.
+                if (!string.IsNullOrWhiteSpace(b.AttachDBFilename))
+                {
+                    return Result<SiteSqlConnection>.Fail(
+                        $"This site uses LocalDB (AttachDBFilename='{b.AttachDBFilename}') and has no Initial Catalog. " +
+                        $"There's no SQL Server database to back up — connect the project to a real DNN database first, then retry the clone. " +
+                        $"(from {sourcePath})");
+                }
+                return Result<SiteSqlConnection>.Fail(
+                    $"SiteSqlServer is missing Data Source or Initial Catalog. " +
+                    $"DataSource='{b.DataSource}', InitialCatalog='{b.InitialCatalog}'. " +
+                    $"Raw='{raw}' (from {sourcePath}).");
+            }
+
+            return Result<SiteSqlConnection>.Ok(new SiteSqlConnection(
+                b.DataSource,
+                b.InitialCatalog,
+                b.UserID ?? "",
+                b.Password ?? ""));
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Failed to read web.config");
+            return Result<SiteSqlConnection>.Fail(ex.Message);
+        }
+    }
+
+    public Result WriteSiteSqlServer(string webConfigPath, SiteSqlConnection newConnection)
+    {
+        try
+        {
+            if (!File.Exists(webConfigPath))
+                return Result.Fail($"web.config not found: {webConfigPath}");
+
+            var doc = XDocument.Load(webConfigPath, LoadOptions.PreserveWhitespace);
+            var connStr = BuildConnectionString(newConnection);
+
+            var (connAdd, connSourceFile, connDoc) = FindAndLoadSection(
+                doc, webConfigPath, "connectionStrings", "add", "name", "SiteSqlServer");
+            if (connAdd is null)
+                return Result.Fail($"connectionStrings/add[@name='SiteSqlServer'] not found in {connSourceFile}.");
+            connAdd.SetAttributeValue("connectionString", connStr);
+            connDoc!.Save(connSourceFile);
+
+            // DNN also reads from appSettings/add[@key='SiteSqlServer'] for the upgrade wizard.
+            var (appAdd, appSourceFile, appDoc) = FindAndLoadSection(
+                doc, webConfigPath, "appSettings", "add", "key", "SiteSqlServer");
+            if (appAdd is not null)
+            {
+                appAdd.SetAttributeValue("value", connStr);
+                appDoc!.Save(appSourceFile);
+            }
+
+            return Result.Ok();
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Failed to write web.config");
+            return Result.Fail(ex.Message);
+        }
+    }
+
+    public Result RemoveRewriteRules(string webConfigPath)
+    {
+        try
+        {
+            if (!File.Exists(webConfigPath))
+                return Result.Fail($"web.config not found: {webConfigPath}");
+
+            var doc = XDocument.Load(webConfigPath, LoadOptions.PreserveWhitespace);
+            var rewrites = doc.Descendants("system.webServer")
+                              .Elements("rewrite")
+                              .ToList();
+            if (rewrites.Count == 0) return Result.Ok(); // nothing to do
+
+            foreach (var r in rewrites) r.Remove();
+            doc.Save(webConfigPath);
+            return Result.Ok();
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Failed to remove rewrite rules from web.config");
+            return Result.Fail(ex.Message);
+        }
+    }
+
+    // Looks up <connectionStrings>; if it uses configSource="…", loads the external file.
+    private XElement? FindConnectionStringElement(XDocument doc, string webConfigPath, out string sourcePath)
+    {
+        var (element, file, _) = FindAndLoadSection(
+            doc, webConfigPath, "connectionStrings", "add", "name", "SiteSqlServer");
+        sourcePath = file;
+        return element;
+    }
+
+    private (XElement? element, string sourceFile, XDocument? sourceDoc) FindAndLoadSection(
+        XDocument doc, string webConfigPath,
+        string sectionName, string childName, string keyAttr, string keyValue)
+    {
+        var section = doc.Descendants(sectionName).FirstOrDefault();
+        if (section is null) return (null, webConfigPath, null);
+
+        var configSource = (string?)section.Attribute("configSource");
+        if (!string.IsNullOrWhiteSpace(configSource))
+        {
+            var dir = Path.GetDirectoryName(webConfigPath) ?? string.Empty;
+            var external = Path.GetFullPath(Path.Combine(dir, configSource));
+            if (!File.Exists(external)) return (null, external, null);
+
+            var extDoc = XDocument.Load(external, LoadOptions.PreserveWhitespace);
+            var extRoot = extDoc.Root;
+            if (extRoot is null) return (null, external, extDoc);
+
+            var found = extRoot.Elements(childName)
+                .FirstOrDefault(e => string.Equals((string?)e.Attribute(keyAttr), keyValue, StringComparison.OrdinalIgnoreCase));
+            return (found, external, extDoc);
+        }
+
+        var inline = section.Elements(childName)
+            .FirstOrDefault(e => string.Equals((string?)e.Attribute(keyAttr), keyValue, StringComparison.OrdinalIgnoreCase));
+        return (inline, webConfigPath, doc);
+    }
+
+    private static string BuildConnectionString(SiteSqlConnection c) =>
+        $"Data Source={c.Server};Initial Catalog={c.Database};User ID={c.User};Password={c.Password}";
+}

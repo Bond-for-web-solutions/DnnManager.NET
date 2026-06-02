@@ -1,0 +1,58 @@
+# ---- DnnManager.NET .gitignore ----
+
+# Build output
+bin/
+obj/
+publish/
+*.user
+*.suo
+*.pidb
+*.userprefs
+
+# Single-file publish output / single-file extracted bundles
+*.deps.json
+*.runtimeconfig.json
+*.pdb
+
+# Rider / VS / VS Code
+.vs/
+.idea/
+*.swp
+*.swo
+
+# NuGet
+*.nupkg
+*.snupkg
+project.lock.json
+project.fragment.lock.json
+packages/
+.nuget/
+
+# Test output
+TestResults/
+coverage/
+*.coverage
+*.coveragexml
+
+# OS junk
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Local secrets / overrides
+appsettings.*.local.json
+appsettings.Local.json
+secrets.json
+*.env
+.env.*
+!appsettings.json
+
+# Backups created at runtime by the tool itself
+*.bak
+clone_*.bak
+developer_*.bak
