@@ -56,3 +56,5 @@ secrets.json
 *.bak
 clone_*.bak
 developer_*.bak
+
+*.zip
