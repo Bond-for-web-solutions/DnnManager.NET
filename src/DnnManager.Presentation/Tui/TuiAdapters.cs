@@ -17,7 +17,10 @@ internal sealed class TuiProgressReporter : IProgressReporter
 internal sealed class TuiUserPrompt : IUserPrompt
 {
     private readonly ConfirmDialog _dialog;
-    public TuiUserPrompt(ConfirmDialog dialog) => _dialog = dialog;
+    private readonly TextPrompt _text;
+    public TuiUserPrompt(ConfirmDialog dialog, TextPrompt text) { _dialog = dialog; _text = text; }
     public Task<bool> ConfirmAsync(string q, bool defaultYes, CancellationToken ct)
         => Task.FromResult(_dialog.Show(q, defaultYes));
+    public Task<string?> PromptTextAsync(string question, CancellationToken ct)
+        => Task.FromResult(_text.Show(question, allowEmpty: false));
 }

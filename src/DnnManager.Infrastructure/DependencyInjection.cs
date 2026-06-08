@@ -33,6 +33,7 @@ public static class InfrastructureServiceCollectionExtensions
         services.AddSingleton<ISqlProfileStore>(sp => sp.GetRequiredService<ConnectionProfileStore>());
         services.AddSingleton<IWebConfigService, WebConfigService>();
         services.AddSingleton<IRemoteSqlBackupService, RemoteSqlBackupService>();
+        services.AddSingleton<IRemoteSqlAdminService, RemoteSqlAdminService>();
         services.AddSingleton<IBacpacService, SqlPackageService>();
 
         services.AddHttpClient<IDnnReleaseService, GitHubDnnReleaseService>();

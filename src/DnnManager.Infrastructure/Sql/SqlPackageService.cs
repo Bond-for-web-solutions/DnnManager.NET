@@ -95,15 +95,21 @@ public sealed class SqlPackageService : IBacpacService
         if (!r.Success)
         {
             _log.LogError("SqlPackage export failed: {Err}\n{Out}", r.StdErr, r.StdOut);
+            TryDelete(bacpacPath); // don't leave a partial/zero-byte .bacpac behind for a later import to pick.
             return Result.Fail($"BACPAC export failed: {Tail(r.StdErr, r.StdOut)}");
         }
-        if (!File.Exists(bacpacPath)) return Result.Fail("BACPAC export reported success but no file was produced.");
+        if (!File.Exists(bacpacPath) || new FileInfo(bacpacPath).Length == 0)
+        {
+            TryDelete(bacpacPath);
+            return Result.Fail("BACPAC export reported success but produced no usable file.");
+        }
         reporter.Success($"Exported BACPAC ({new FileInfo(bacpacPath).Length / 1024d / 1024d:N1} MB).");
         return Result.Ok();
     }
 
     public async Task<Result> ImportAsync(string targetServer, string saUser, string saPassword,
-        string databaseName, string bacpacPath, IProgressReporter reporter, CancellationToken ct)
+        string databaseName, string bacpacPath, IProgressReporter reporter, CancellationToken ct,
+        IReadOnlyDictionary<string, string>? properties = null)
     {
         var exe = ResolveExe();
         if (exe is null) return Result.Fail(InstallHint);
@@ -119,12 +125,15 @@ public sealed class SqlPackageService : IBacpacService
             ConnectTimeout = 60
         }.ConnectionString;
 
-        var args = new[]
+        var args = new List<string>
         {
             "/Action:Import",
             $"/TargetConnectionString:{cs}",
             $"/SourceFile:{bacpacPath}"
         };
+        if (properties is not null)
+            foreach (var kv in properties)
+                args.Add($"/p:{kv.Key}={kv.Value}");
 
         reporter.Step($"Importing BACPAC into [{databaseName}]");
         reporter.Info("This can take several minutes…");
@@ -143,6 +152,11 @@ public sealed class SqlPackageService : IBacpacService
     {
         var s = server.Trim();
         return s.StartsWith("tcp:", StringComparison.OrdinalIgnoreCase) ? s[4..] : s;
+    }
+
+    private static void TryDelete(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); } catch { /* best-effort */ }
     }
 
     private static string Tail(string err, string outp)

@@ -47,14 +47,25 @@ internal sealed class ImportView
 
         var p = _repo.Build(project);
         var dir = p.BackupDirectory;
+        // Azure production can only be overwritten from a .bacpac, so don't offer .bak there.
+        var prod = env == DnnEnvironment.Production;
         var files = Directory.Exists(dir)
-            ? Directory.EnumerateFiles(dir, "*.bak").OrderByDescending(File.GetLastWriteTime).ToList()
+            ? Directory.EnumerateFiles(dir)
+                .Where(f => f.EndsWith(".bacpac", StringComparison.OrdinalIgnoreCase)
+                         || (!prod && f.EndsWith(".bak", StringComparison.OrdinalIgnoreCase)))
+                .OrderByDescending(File.GetLastWriteTime).ToList()
             : new List<string>();
-        if (files.Count == 0) { _screen.Clear(); _status.Fail($"No .bak files in {dir}"); _status.Pause(); return; }
+        if (files.Count == 0)
+        {
+            _screen.Clear();
+            _status.Fail(prod ? $"No .bacpac files in {dir} (Azure SQL requires a .bacpac)." : $"No .bak or .bacpac files in {dir}");
+            _status.Pause();
+            return;
+        }
 
         var bakMenu = new SelectableList<string>(_screen)
         {
-            Title = $"Select a .bak file in {dir}",
+            Title = $"Select a backup file in {dir}",
             Items = files,
             Display = f => $"{Path.GetFileName(f)}  ({new FileInfo(f).Length / 1024d / 1024d:N1} MB)"
         };
