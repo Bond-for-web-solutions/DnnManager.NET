@@ -98,7 +98,7 @@ public sealed class ProjectFileCopier : IProjectFileCopier
                 reporter.Progress($"{i + 1}/{files.Count}  {rel}");
 
                 // A single locked/transient file on the server (e.g. an in-use
-                // cache file) must not abort the whole clone — record and move on.
+                // cache file) must not abort the whole clone - record and move on.
                 try
                 {
                     var status = await client.DownloadFile(localPath, item.FullName,
@@ -160,7 +160,7 @@ public sealed class ProjectFileCopier : IProjectFileCopier
         "imageflow_hybrid_cache",
         "_imagecache",
         "Cache",
-        "Search",   // Lucene search index — rebuilt by DNN, often locked
+        "Search",   // Lucene search index - rebuilt by DNN, often locked
         "Logs",
     };
 

@@ -194,7 +194,7 @@ BEGIN
         UPDATE dbo.PortalAlias SET HTTPAlias = N'{hn}' WHERE PortalAliasID = @existingId;
     ELSE
     BEGIN
-        -- No matching alias to rewrite — insert one. Use a column list that's compatible
+        -- No matching alias to rewrite - insert one. Use a column list that's compatible
         -- with DNN 9.x schemas; rely on column defaults for anything else.
         IF COL_LENGTH('dbo.PortalAlias','BrowserType') IS NOT NULL AND COL_LENGTH('dbo.PortalAlias','IsPrimary') IS NOT NULL
             INSERT INTO dbo.PortalAlias (PortalID, HTTPAlias, CultureCode, Skin, BrowserType, IsPrimary, CreatedByUserID, CreatedOnDate, LastModifiedByUserID, LastModifiedOnDate)

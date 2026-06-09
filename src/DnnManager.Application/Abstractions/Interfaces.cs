@@ -45,13 +45,18 @@ public interface IIisManager
     Result CreateSite(string siteName, string physicalPath, string hostname, int port);
     Result RemoveSite(string siteName);
     Result StartSite(string siteName);
+
+    /// <summary>True when IIS is installed and its configuration is reachable on this machine.
+    /// Lets setup skip website creation gracefully instead of failing when IIS is absent.</summary>
+    bool IsAvailable();
+
     bool SiteExists(string siteName);
     string? GetSiteState(string siteName);
     Result GrantPermissions(string path, IEnumerable<string> identities);
 
     /// <summary>
     /// Deletes the Windows user profile auto-created for the app pool's virtual identity
-    /// (<c>IIS APPPOOL\&lt;poolName&gt;</c>) — i.e. the leftover <c>C:\Users\&lt;poolName&gt;</c> folder and
+    /// (<c>IIS APPPOOL\&lt;poolName&gt;</c>) - i.e. the leftover <c>C:\Users\&lt;poolName&gt;</c> folder and
     /// its ProfileList registry entry. Matched strictly by the deterministic app-pool SID, so it
     /// only ever removes this pool's profile. Best-effort and idempotent: a no-op (still Ok) when no
     /// such profile exists. Call only after the pool's worker has exited (see <see cref="RemoveSite"/>).
@@ -177,7 +182,7 @@ public interface IWebConfigService
     /// <summary>
     /// Removes the IIS URL Rewrite section (system.webServer/rewrite). Those rules are
     /// production-only (HTTPS redirects, request blocking) and require the URL Rewrite module,
-    /// which is usually absent locally — otherwise IIS returns HTTP 500.19. Safe no-op if absent.
+    /// which is usually absent locally - otherwise IIS returns HTTP 500.19. Safe no-op if absent.
     /// </summary>
     Result RemoveRewriteRules(string webConfigPath);
 }
@@ -190,6 +195,13 @@ public interface IBacpacService
 {
     /// <summary>True when the SqlPackage tool can be located on this machine.</summary>
     bool IsAvailable();
+
+    /// <summary>
+    /// Ensures SqlPackage is available, installing it as a .NET global tool on demand the first time
+    /// (requires the .NET SDK and <c>dotnet</c> on PATH). A no-op when SqlPackage is already present.
+    /// Returns a failed <see cref="Result"/> with a manual-install hint when it cannot be provisioned.
+    /// </summary>
+    Task<Result> EnsureAvailableAsync(IProgressReporter reporter, CancellationToken ct);
 
     /// <summary>Install hint shown when SqlPackage is missing.</summary>
     string InstallHint { get; }
@@ -218,7 +230,7 @@ public interface IRemoteSqlAdminService
 {
     /// <summary>
     /// Connects to <paramref name="target"/> via [master] and reports whether it is Azure SQL Database,
-    /// whether the named database exists, and — for Azure — its current edition and service
+    /// whether the named database exists, and - for Azure - its current edition and service
     /// objective so a recreated database can keep the same tier.
     /// </summary>
     Task<Result<RemoteDbInfo>> InspectAsync(SiteSqlConnection target, CancellationToken ct);

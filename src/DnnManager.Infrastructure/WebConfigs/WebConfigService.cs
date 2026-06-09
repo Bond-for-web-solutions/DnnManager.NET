@@ -39,14 +39,14 @@ public sealed class WebConfigService : IWebConfigService
 
             if (string.IsNullOrWhiteSpace(b.DataSource) || string.IsNullOrWhiteSpace(b.InitialCatalog))
             {
-                // Common DNN template case: AttachDBFilename / LocalDB / User Instance — there's no
+                // Common DNN template case: AttachDBFilename / LocalDB / User Instance - there's no
                 // real SQL Server database here so cloning isn't possible until the site is wired
                 // up to a proper DB.
                 if (!string.IsNullOrWhiteSpace(b.AttachDBFilename))
                 {
                     return Result<SiteSqlConnection>.Fail(
                         $"This site uses LocalDB (AttachDBFilename='{b.AttachDBFilename}') and has no Initial Catalog. " +
-                        $"There's no SQL Server database to back up — connect the project to a real DNN database first, then retry the clone. " +
+                        $"There's no SQL Server database to back up - connect the project to a real DNN database first, then retry the clone. " +
                         $"(from {sourcePath})");
                 }
                 return Result<SiteSqlConnection>.Fail(

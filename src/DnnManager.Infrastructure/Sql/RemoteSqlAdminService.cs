@@ -7,7 +7,7 @@ namespace DnnManager.Infrastructure.Sql;
 
 /// <summary>
 /// Admin operations against a remote/Azure SQL Server used when overwriting a production database.
-/// Connects through [master] so it can both read database sizing and issue DROP DATABASE — neither
+/// Connects through [master] so it can both read database sizing and issue DROP DATABASE - neither
 /// of which a contained/database-scoped user can do.
 /// </summary>
 public sealed class RemoteSqlAdminService : IRemoteSqlAdminService

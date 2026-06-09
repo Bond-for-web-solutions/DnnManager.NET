@@ -10,7 +10,7 @@ namespace DnnManager.Infrastructure.Iis;
 
 public sealed class IisManager : IIisManager
 {
-    // App pool names Windows ships with — never delete their shared profiles even if a project
+    // App pool names Windows ships with - never delete their shared profiles even if a project
     // were (pathologically) named the same.
     private static readonly HashSet<string> ReservedAppPools = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -30,8 +30,8 @@ public sealed class IisManager : IIisManager
     {
         try
         {
-            // Fully tear down any existing site/pool of this name first — stopping and waiting
-            // for its worker to exit — so we never re-create on top of a running w3wp that still
+            // Fully tear down any existing site/pool of this name first - stopping and waiting
+            // for its worker to exit - so we never re-create on top of a running w3wp that still
             // holds the physical-path files (which would orphan it and race file access).
             RemoveSite(siteName);
 
@@ -58,7 +58,7 @@ public sealed class IisManager : IIisManager
         {
             // 1) Stop the site and pool, but don't remove them yet. Stopping a pool only
             //    *initiates* WAS shutdown; the w3wp.exe worker lingers (up to its shutdown
-            //    time limit) and keeps file handles open on the site's physical path — the
+            //    time limit) and keeps file handles open on the site's physical path - the
             //    DNN assemblies in \bin, App_Data, logs. Removing the pool config here would
             //    orphan that still-running worker and let the caller's directory delete race
             //    it ("being used by another process").
@@ -113,7 +113,7 @@ public sealed class IisManager : IIisManager
 
                 if (pool.State == ObjectState.Stopped)
                 {
-                    // -1 so a failed read does NOT look like "0 workers, safe to delete" — we
+                    // -1 so a failed read does NOT look like "0 workers, safe to delete" - we
                     // only return once we've positively observed zero live workers.
                     var workers = -1;
                     try { workers = pool.WorkerProcesses.Count; } catch { /* re-read next poll */ }
@@ -161,6 +161,21 @@ public sealed class IisManager : IIisManager
             return Result.Ok();
         }
         catch (Exception ex) { return Result.Fail(ex.Message); }
+    }
+
+    public bool IsAvailable()
+    {
+        try
+        {
+            using var sm = new ServerManager();
+            _ = sm.Sites.Count; // force applicationHost.config to load; throws if IIS isn't installed
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "IIS is not available on this machine");
+            return false;
+        }
     }
 
     public bool SiteExists(string siteName)

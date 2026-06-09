@@ -64,9 +64,19 @@ public sealed class SetupProjectUseCase
         try
         {
             reporter.Step("Step 1: Prerequisites");
-            var docker = await _prereq.CheckDockerAsync(reporter, ct);
-            if (!docker.Success) return docker;
-            await _prereq.EnsureIisFeaturesAsync(reporter, _prompt, ct);
+            // Docker and IIS are optional. If either is missing we skip the steps that need it
+            // and still lay down the project files + env, instead of aborting the whole setup.
+            var dockerAvailable = (await _prereq.CheckDockerAsync(reporter, ct)).Success;
+            if (!dockerAvailable)
+                reporter.Info("Docker not found - skipping SQL Server/database provisioning. " +
+                              "Edit the project's .env files to point at your own database later.");
+
+            var iisAvailable = _iis.IsAvailable();
+            if (iisAvailable)
+                await _prereq.EnsureIisFeaturesAsync(reporter, _prompt, ct);
+            else
+                reporter.Info("IIS not found - skipping website creation. Install IIS and re-run " +
+                              "setup to host the site, or use your own web server.");
 
             var project = _projects.Build(req.ProjectName);
             var hostname = $"{req.ProjectName}.{_opts.HostnameSuffix}";
@@ -94,34 +104,114 @@ public sealed class SetupProjectUseCase
             if (!extract.Success) return extract;
 
             reporter.Step("Step 5: IIS website");
-            _iis.RemoveSite(req.ProjectName);
-            var create = _iis.CreateSite(req.ProjectName, project.ProjectDirectory, hostname, _opts.SitePort);
-            if (!create.Success) return create;
-            _iis.GrantPermissions(project.ProjectDirectory, new[]
+            var siteCreated = false;
+            if (iisAvailable)
             {
-                "IIS_IUSRS",
-                "IUSR",
-                $"IIS APPPOOL\\{req.ProjectName}"
-            });
-            reporter.Success($"IIS site '{req.ProjectName}' bound to http://{hostname}");
+                _iis.RemoveSite(req.ProjectName);
+                var create = _iis.CreateSite(req.ProjectName, project.ProjectDirectory, hostname, _opts.SitePort);
+                if (!create.Success)
+                {
+                    reporter.Fail($"IIS site creation failed: {create.Error}. Continuing without a website.");
+                }
+                else
+                {
+                    _iis.GrantPermissions(project.ProjectDirectory, new[]
+                    {
+                        "IIS_IUSRS",
+                        "IUSR",
+                        $"IIS APPPOOL\\{req.ProjectName}"
+                    });
+                    siteCreated = true;
+                    reporter.Success($"IIS site '{req.ProjectName}' bound to http://{hostname}");
+                }
+            }
+            else
+            {
+                reporter.Info("Skipped - IIS not available.");
+            }
 
-            reporter.Step("Step 6: Docker config + SQL Server");
-            var containerName = _opts.Docker.ContainerName;
+            reporter.Step("Step 6: Database & environment files");
+            // Provision the SQL container/database only when Docker is present; otherwise fall back
+            // to the default port so the env files still carry sensible (editable) values.
+            var port = dockerAvailable
+                ? await TryProvisionDatabaseAsync(req, project, reporter, ct)
+                : _opts.Docker.DefaultPort;
+            if (!dockerAvailable)
+            {
+                // Still emit the compose config (pure file output) so the project is ready to
+                // `docker compose up` once Docker is installed \u2014 we just don't start it now.
+                await _dockerCfg.WriteAsync(project, port, ct);
+                reporter.Info("Skipped database provisioning \u2014 Docker not available. Wrote " +
+                              "docker-compose config; install Docker and run compose to start SQL Server.");
+            }
+
+            // Always write the env files so the project is complete and the user can wire up a DB.
+            var db = MakeDbConfig(req, project, port);
+            await _envFiles.EnsureDeveloperEnvAsync(project, db, ct);
+            await _envFiles.EnsureProductionEnvAsync(project, ct);
+
+            if (siteCreated)
+            {
+                reporter.Step("Step 7: Start site & verify");
+                _iis.StartSite(req.ProjectName);
+                var http = await _http.CheckAsync($"http://{hostname}", 15, ct);
+                if (http.Success)
+                    reporter.Success($"HTTP {http.Value} from http://{hostname}");
+                else
+                    reporter.Info($"HTTP probe: {http.Error} (expected before install wizard runs)");
+            }
+
+            reporter.Step("Setup complete");
+            if (siteCreated)
+                reporter.Success($"Open http://{hostname} to complete the DNN Installation Wizard.");
+            else
+                reporter.Success($"DNN files are ready in {project.ProjectDirectory}. " +
+                                 "Point a web server (and database) at them to run the install wizard.");
+            return Result.Ok();
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Setup failed for {Project}", req.ProjectName);
+            return Result.Fail(ex.Message);
+        }
+    }
+
+    private DatabaseConfig MakeDbConfig(SetupProjectRequest req, DnnProject project, int port) =>
+        new(
+            Server: $"localhost,{port}",
+            DatabaseName: req.ProjectName + _opts.Docker.DefaultDbNameSuffix,
+            User: req.ProjectName + _opts.Docker.DefaultDbUserSuffix,
+            Password: _opts.Docker.DefaultDbPassword,
+            Collation: _opts.Docker.Collation,
+            Port: port,
+            BackupDirectory: project.BackupDirectory);
+
+    // Best-effort SQL provisioning: starts/reuses the shared container, waits for SQL, and creates
+    // the project's database + user. Any sub-step failure is reported and skipped (not fatal) so the
+    // overall setup can still finish; returns the port to record in the env files.
+    private async Task<int> TryProvisionDatabaseAsync(
+        SetupProjectRequest req, DnnProject project, IProgressReporter reporter, CancellationToken ct)
+    {
+        var containerName = _opts.Docker.ContainerName;
+        var port = _opts.Docker.DefaultPort;
+        try
+        {
             var containerExists = await _docker.DoesContainerExistAsync(containerName, ct);
-            var containerRunning = containerExists
-                && await _docker.IsContainerRunningAsync(containerName, ct);
+            var containerRunning = containerExists && await _docker.IsContainerRunningAsync(containerName, ct);
 
-            int port;
             if (containerExists)
             {
-                // Reuse the existing shared SQL Server container instead of failing
-                // with a name conflict on `docker compose up`. Just provision a new
-                // database/user inside it for this project.
+                // Reuse the existing shared SQL Server container instead of failing with a name
+                // conflict on `docker compose up`. Just provision a new database/user inside it.
                 if (!containerRunning)
                 {
-                    reporter.Info($"Container '{containerName}' exists but is stopped \u2014 starting it.");
+                    reporter.Info($"Container '{containerName}' exists but is stopped - starting it.");
                     var start = await _docker.StartContainerAsync(containerName, ct);
-                    if (!start.Success) return start;
+                    if (!start.Success)
+                    {
+                        reporter.Fail($"Could not start container '{containerName}': {start.Error}. Skipping database setup.");
+                        return port;
+                    }
                 }
                 else
                 {
@@ -130,7 +220,10 @@ public sealed class SetupProjectUseCase
 
                 var existingPort = await _docker.GetPublishedPortAsync(containerName, ct);
                 if (existingPort is null)
-                    return Result.Fail($"Could not determine published port for container '{containerName}'.");
+                {
+                    reporter.Fail($"Could not determine published port for '{containerName}'. Skipping database setup.");
+                    return port;
+                }
                 port = existingPort.Value;
                 await _dockerCfg.WriteAsync(project, port, ct);
             }
@@ -140,48 +233,39 @@ public sealed class SetupProjectUseCase
                 await _dockerCfg.WriteAsync(project, port, ct);
 
                 var up = await _docker.ComposeUpAsync(project.ComposeFile, project.EnvFile, "dnn-shared", ct);
-                if (!up.Success) return up;
+                if (!up.Success)
+                {
+                    reporter.Fail($"docker compose up failed: {up.Error}. Skipping database setup.");
+                    return port;
+                }
             }
 
             var ready = await _sql.WaitReadyAsync(180, reporter, ct);
-            if (!ready.Success) return ready;
+            if (!ready.Success)
+            {
+                reporter.Fail($"SQL Server did not become ready: {ready.Error}. Skipping database setup.");
+                return port;
+            }
 
-            var db = new DatabaseConfig(
-                Server: $"localhost,{port}",
-                DatabaseName: req.ProjectName + _opts.Docker.DefaultDbNameSuffix,
-                User: req.ProjectName + _opts.Docker.DefaultDbUserSuffix,
-                Password: _opts.Docker.DefaultDbPassword,
-                Collation: _opts.Docker.Collation,
-                Port: port,
-                BackupDirectory: project.BackupDirectory);
-
+            var db = MakeDbConfig(req, project, port);
             var exists = await _sql.DatabaseExistsAsync(db.DatabaseName, ct);
             if (exists.Success && exists.Value &&
                 await _prompt.ConfirmAsync($"Database '{db.DatabaseName}' exists. Drop and recreate?", false, ct))
             {
                 await _sql.DropDatabaseAndUserAsync(db, ct);
             }
-            await _sql.CreateDatabaseAndUserAsync(db, ct);
-            await _envFiles.EnsureDeveloperEnvAsync(project, db, ct);
-            await _envFiles.EnsureProductionEnvAsync(project, ct);
-
-            reporter.Step("Step 7: Start site & verify");
-            _iis.StartSite(req.ProjectName);
-            var http = await _http.CheckAsync($"http://{hostname}", 15, ct);
-            if (http.Success)
-                reporter.Success($"HTTP {http.Value} from http://{hostname}");
+            var created = await _sql.CreateDatabaseAndUserAsync(db, ct);
+            if (created.Success)
+                reporter.Success($"Database '{db.DatabaseName}' ready on localhost,{port}.");
             else
-                reporter.Info($"HTTP probe: {http.Error} (expected before install wizard runs)");
-
-            reporter.Step("Setup complete");
-            reporter.Success($"Open http://{hostname} to complete the DNN Installation Wizard.");
-            return Result.Ok();
+                reporter.Fail($"Database creation reported an error: {created.Error}");
         }
         catch (Exception ex)
         {
-            _log.LogError(ex, "Setup failed for {Project}", req.ProjectName);
-            return Result.Fail(ex.Message);
+            _log.LogWarning(ex, "Database provisioning failed for {Project}", req.ProjectName);
+            reporter.Fail($"Database setup skipped: {ex.Message}");
         }
+        return port;
     }
 
     private static int FindFreePort(int preferred)

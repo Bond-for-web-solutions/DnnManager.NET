@@ -47,7 +47,7 @@ internal sealed class CloneView
         // 1. Source kind first.
         var kindMenu = new SelectableList<SourceKindChoice>(_screen)
         {
-            Title = "Clone a DNN project — choose source",
+            Title = "Clone a DNN project - choose source",
             Hint = "↑/↓ · Enter · Esc to cancel",
             Items = new[]
             {
@@ -75,7 +75,7 @@ internal sealed class CloneView
 
             var projectMenu = new SelectableList<ProjectPick>(_screen)
             {
-                Title = "FTP source — choose project",
+                Title = "FTP source - choose project",
                 Hint = "↑/↓ · Enter · Esc to cancel",
                 Items = picks.ToArray(),
                 Display = c => c.Label
@@ -85,7 +85,7 @@ internal sealed class CloneView
 
             if (picked.Project is not null)
             {
-                // Existing saved project — reuse connections and pick an action.
+                // Existing saved project - reuse connections and pick an action.
                 target = picked.Project;
                 var action = PickAction(target);
                 if (action is null) return;
@@ -163,7 +163,7 @@ internal sealed class CloneView
     private string? AskProjectName(string sourceLabel)
     {
         _screen.Clear();
-        _screen.DrawCentredTitle(1, $"Clone from {sourceLabel} — name the new project", Theme.HeaderFg);
+        _screen.DrawCentredTitle(1, $"Clone from {sourceLabel} - name the new project", Theme.HeaderFg);
         Console.SetCursorPosition(0, 3);
         var name = _text.Show("Project name");
         return string.IsNullOrWhiteSpace(name) ? null : name;
@@ -174,13 +174,13 @@ internal sealed class CloneView
     {
         var items = new[]
         {
-            new ActionChoice(CloneAction.Full,         "Clone — website files + database"),
+            new ActionChoice(CloneAction.Full,         "Clone - website files + database"),
             new ActionChoice(CloneAction.FilesOnly,    "Overwrite website files only"),
             new ActionChoice(CloneAction.DatabaseOnly, "Overwrite database only"),
         };
         var menu = new SelectableList<ActionChoice>(_screen)
         {
-            Title = $"'{project}' — what do you want to do?",
+            Title = $"'{project}' - what do you want to do?",
             Hint = "↑/↓ · Enter · Esc to cancel",
             Items = items,
             Display = c => c.Label
@@ -201,7 +201,7 @@ internal sealed class CloneView
 
         var menu = new SelectableList<SqlProfileChoice>(_screen)
         {
-            Title = $"Source database credentials — {project}",
+            Title = $"Source database credentials - {project}",
             Hint = "↑/↓ · Enter · Esc to cancel",
             Items = items.ToArray(),
             Display = c => c.Label
@@ -219,7 +219,7 @@ internal sealed class CloneView
 
         // New connection.
         _screen.Clear();
-        _screen.DrawCentredTitle(1, "Source database — new connection", Theme.HeaderFg);
+        _screen.DrawCentredTitle(1, "Source database - new connection", Theme.HeaderFg);
         Console.SetCursorPosition(0, 3);
 
         var host = _text.Show("SQL server");
@@ -325,7 +325,7 @@ internal sealed class CloneView
 
             var menu = new SelectableList<ProfileChoice>(_screen)
             {
-                Title = $"FTP source — {project}",
+                Title = $"FTP source - {project}",
                 Hint = "↑/↓ · Enter · Esc to cancel",
                 Items = items,
                 Display = c => c.Label
@@ -349,7 +349,7 @@ internal sealed class CloneView
         else
         {
             _screen.Clear();
-            _screen.DrawCentredTitle(1, "FTP source — new connection", Theme.HeaderFg);
+            _screen.DrawCentredTitle(1, "FTP source - new connection", Theme.HeaderFg);
             Console.SetCursorPosition(0, 3);
 
             var h = _text.Show("FTP host");
@@ -403,7 +403,7 @@ internal sealed class CloneView
 
             var menu = new SelectableList<NavItem>(_screen)
             {
-                Title = $"FTP — {host}:{cwd}",
+                Title = $"FTP - {host}:{cwd}",
                 Hint = "↑/↓ · Enter to open · Esc to cancel",
                 Items = items.ToArray(),
                 Display = i => i.Label

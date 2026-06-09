@@ -35,6 +35,40 @@ public sealed class SqlPackageService : IBacpacService
 
     public bool IsAvailable() => ResolveExe() is not null;
 
+    public async Task<Result> EnsureAvailableAsync(IProgressReporter reporter, CancellationToken ct)
+    {
+        if (ResolveExe() is not null) return Result.Ok();
+
+        // Not installed - provision it as a .NET global tool. After this, ResolveExe() finds it
+        // under ~/.dotnet/tools. Requires the .NET SDK; we surface a manual hint if that's missing.
+        reporter.Step("SqlPackage not found - installing it (one-time)…");
+        reporter.Info("Running: dotnet tool install --global Microsoft.SqlPackage");
+        try
+        {
+            var r = await _proc.RunAsync("dotnet",
+                new[] { "tool", "install", "--global", "Microsoft.SqlPackage" }, ct);
+
+            // `install` exits non-zero when the tool is already present, so don't trust the exit
+            // code alone - the real test is whether we can now resolve the executable.
+            if (ResolveExe() is not null)
+            {
+                reporter.Success("SqlPackage is ready.");
+                return Result.Ok();
+            }
+
+            _log.LogError("SqlPackage auto-install failed: {Err}\n{Out}", r.StdErr, r.StdOut);
+            return Result.Fail($"Automatic SqlPackage install did not succeed: {Tail(r.StdErr, r.StdOut)}. " +
+                               "Install it manually with:  dotnet tool install -g microsoft.sqlpackage");
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Could not run 'dotnet tool install' for SqlPackage");
+            return Result.Fail($"Could not run 'dotnet' to install SqlPackage ({ex.Message}). " +
+                               "Install the .NET SDK (so 'dotnet' is on PATH), then retry - or install it " +
+                               "manually with:  dotnet tool install -g microsoft.sqlpackage");
+        }
+    }
+
     /// <summary>Finds the SqlPackage executable: the dotnet global tool location, then PATH.</summary>
     private static string? ResolveExe()
     {

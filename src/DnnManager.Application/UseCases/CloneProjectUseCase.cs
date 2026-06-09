@@ -41,6 +41,7 @@ public sealed class CloneProjectUseCase
     private readonly ISqlServerService _sql;
     private readonly IEnvFileService _envFiles;
     private readonly IIisManager _iis;
+    private readonly IPrerequisiteChecker _prereq;
     private readonly IUserPrompt _prompt;
     private readonly ILogger<CloneProjectUseCase> _log;
 
@@ -56,6 +57,7 @@ public sealed class CloneProjectUseCase
         ISqlServerService sql,
         IEnvFileService envFiles,
         IIisManager iis,
+        IPrerequisiteChecker prereq,
         IUserPrompt prompt,
         ILogger<CloneProjectUseCase> log)
     {
@@ -70,6 +72,7 @@ public sealed class CloneProjectUseCase
         _sql = sql;
         _envFiles = envFiles;
         _iis = iis;
+        _prereq = prereq;
         _prompt = prompt;
         _log = log;
     }
@@ -96,12 +99,12 @@ public sealed class CloneProjectUseCase
             else
             {
                 reporter.Step("Keeping existing website files");
-                reporter.Info("Skipped file copy — using the files already in the target folder.");
+                reporter.Info("Skipped file copy - using the files already in the target folder.");
             }
 
             // Strip the IIS URL Rewrite section. Those rules (HTTPS redirect, request blocking)
             // are production-only and need the URL Rewrite module, which is usually absent locally
-            // — otherwise IIS returns HTTP 500.19. DNN doesn't need them for local dev.
+            // - otherwise IIS returns HTTP 500.19. DNN doesn't need them for local dev.
             var siteWebConfig = Path.Combine(project.ProjectDirectory, "web.config");
             if (File.Exists(siteWebConfig))
             {
@@ -109,10 +112,33 @@ public sealed class CloneProjectUseCase
                 if (stripped.Success) reporter.Info("Removed URL Rewrite rules (not needed locally).");
             }
 
-            if (!req.SeedDatabase)
+            // Seeding restores the source DB into the local Docker SQL container, so it needs Docker.
+            // If Docker is absent we skip seeding (like a files-only clone) instead of hard-failing.
+            var dockerAvailable = false;
+            if (req.SeedDatabase)
             {
-                // Files-only run: skip every database step below.
-                reporter.Info("Skipping database — website files only.");
+                dockerAvailable = (await _prereq.CheckDockerAsync(reporter, ct)).Success;
+                if (!dockerAvailable)
+                    reporter.Info("Docker not found - skipping database seeding. The cloned files are kept; " +
+                                  "configure a database and update the site's web.config/.env yourself.");
+            }
+
+            if (!req.SeedDatabase || !dockerAvailable)
+            {
+                if (!req.SeedDatabase)
+                    reporter.Info("Skipping database - website files only.");
+
+                // Still lay down env files so the project is complete and editable later.
+                var fallbackDb = new DatabaseConfig(
+                    Server: $"localhost,{_opts.Docker.DefaultPort}",
+                    DatabaseName: req.TargetProjectName + _opts.Docker.DefaultDbNameSuffix,
+                    User: req.TargetProjectName + _opts.Docker.DefaultDbUserSuffix,
+                    Password: _opts.Docker.DefaultDbPassword,
+                    Collation: _opts.Docker.Collation,
+                    Port: _opts.Docker.DefaultPort,
+                    BackupDirectory: project.BackupDirectory);
+                await _envFiles.EnsureDeveloperEnvAsync(project, fallbackDb, ct);
+                await _envFiles.EnsureProductionEnvAsync(project, ct);
             }
             else
             {
@@ -147,7 +173,7 @@ public sealed class CloneProjectUseCase
             {
                 // web.config unreadable, but the user gave us a full connection.
                 src = req.SourceDbOverride;
-                reporter.Info("web.config had no usable connection — using supplied SQL connection.");
+                reporter.Info("web.config had no usable connection - using supplied SQL connection.");
             }
             else
             {
@@ -156,11 +182,14 @@ public sealed class CloneProjectUseCase
             reporter.Success($"Source DB: [{src.Database}] on {src.Server} (user: {src.User})");
 
             // Azure SQL Database can't produce a .bak, so it is cloned via a BACPAC
-            // (SqlPackage export+import) instead of BACKUP/RESTORE. Detect it up front
-            // and fail fast if the SqlPackage tool is missing.
+            // (SqlPackage export+import) instead of BACKUP/RESTORE. Detect it up front and
+            // provision SqlPackage now - failing fast before any Docker setup if it can't be installed.
             var sourceIsAzure = src.Server.Contains("database.windows.net", StringComparison.OrdinalIgnoreCase);
-            if (sourceIsAzure && !_bacpac.IsAvailable())
-                return Result.Fail(_bacpac.InstallHint);
+            if (sourceIsAzure)
+            {
+                var ensuredEarly = await _bacpac.EnsureAvailableAsync(reporter, ct);
+                if (!ensuredEarly.Success) return ensuredEarly;
+            }
 
             // 4) Ensure shared docker SQL container is up, write compose, get port
             reporter.Step("Preparing local SQL Server (Docker)");
@@ -212,7 +241,7 @@ public sealed class CloneProjectUseCase
             var exists = await _sql.DatabaseExistsAsync(db.DatabaseName, ct);
             if (exists.Success && exists.Value)
             {
-                reporter.Info($"Local database [{db.DatabaseName}] exists — dropping and recreating.");
+                reporter.Info($"Local database [{db.DatabaseName}] exists - dropping and recreating.");
                 var drop = await _sql.DropDatabaseAndUserAsync(db, ct);
                 if (!drop.Success) return drop;
             }
@@ -223,6 +252,7 @@ public sealed class CloneProjectUseCase
             if (sourceIsAzure)
             {
                 // 6) Export the Azure database to a BACPAC, then import it locally.
+                // SqlPackage was already provisioned up front (see the sourceIsAzure check above).
                 var bacpacTmp = Path.Combine(Path.GetTempPath(), $"dnnmgr_clone_{req.TargetProjectName}_{stamp}.bacpac");
                 var export = await _bacpac.ExportAsync(src, bacpacTmp, reporter, ct);
                 if (!export.Success) return export;
@@ -254,7 +284,7 @@ public sealed class CloneProjectUseCase
                 string srcBakHostPath;
                 if (await IsLocalDockerSourceAsync(src, ct))
                 {
-                    reporter.Info("Source DB is on the local Docker SQL container — using container backup path.");
+                    reporter.Info("Source DB is on the local Docker SQL container - using container backup path.");
                     var fileName = Path.GetFileName(req.SourceBackupServerPath);
                     var dockerBak = await _sql.BackupDatabaseLocalAsync(src.Database, fileName, ct);
                     if (!dockerBak.Success || dockerBak.Value is null)
@@ -300,25 +330,41 @@ public sealed class CloneProjectUseCase
             await _envFiles.EnsureProductionEnvAsync(project, ct);
             } // end database block (req.SeedDatabase)
 
-            // 10) Optional IIS site
-            if (req.CreateIisSite)
+            // 10) Optional IIS site - skipped (not fatal) when IIS is absent or creation fails.
+            var siteCreated = false;
+            if (req.CreateIisSite && _iis.IsAvailable())
             {
                 reporter.Step("Creating IIS site");
                 _iis.RemoveSite(req.TargetProjectName);
                 var siteCreate = _iis.CreateSite(req.TargetProjectName, project.ProjectDirectory, hostname, _opts.SitePort);
-                if (!siteCreate.Success) return siteCreate;
-                _iis.GrantPermissions(project.ProjectDirectory, new[]
+                if (!siteCreate.Success)
                 {
-                    "IIS_IUSRS",
-                    "IUSR",
-                    $"IIS APPPOOL\\{req.TargetProjectName}"
-                });
-                _iis.StartSite(req.TargetProjectName);
-                reporter.Success($"IIS site '{req.TargetProjectName}' bound to http://{hostname}");
+                    reporter.Fail($"IIS site creation failed: {siteCreate.Error}. Continuing without a website.");
+                }
+                else
+                {
+                    _iis.GrantPermissions(project.ProjectDirectory, new[]
+                    {
+                        "IIS_IUSRS",
+                        "IUSR",
+                        $"IIS APPPOOL\\{req.TargetProjectName}"
+                    });
+                    _iis.StartSite(req.TargetProjectName);
+                    siteCreated = true;
+                    reporter.Success($"IIS site '{req.TargetProjectName}' bound to http://{hostname}");
+                }
+            }
+            else if (req.CreateIisSite)
+            {
+                reporter.Info("Skipped IIS site - IIS not available.");
             }
 
             reporter.Step("Clone complete");
-            reporter.Success($"Open http://{hostname} to use the cloned site.");
+            if (siteCreated)
+                reporter.Success($"Open http://{hostname} to use the cloned site.");
+            else
+                reporter.Success($"Cloned files are ready in {project.ProjectDirectory}. " +
+                                 "Point a web server (and database) at them to use the site.");
             return Result.Ok();
         }
         catch (Exception ex)

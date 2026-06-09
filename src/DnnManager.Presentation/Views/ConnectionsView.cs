@@ -43,7 +43,7 @@ internal sealed class ConnectionsView
 
             var projMenu = new SelectableList<NameChoice>(_screen)
             {
-                Title = "Saved connections — choose project",
+                Title = "Saved connections - choose project",
                 Hint = "↑/↓ · Enter · Esc to go back",
                 Items = projects.Select(p => new NameChoice(p)).ToArray(),
                 Display = p => p.Name
@@ -66,16 +66,16 @@ internal sealed class ConnectionsView
             var items = new[]
             {
                 new KindChoice(true, ftp is null
-                    ? "FTP  — (none — add)"
-                    : $"FTP  — {ftp.User}@{ftp.Host}:{ftp.Port}  {ftp.RemotePath}"),
+                    ? "FTP  - (none - add)"
+                    : $"FTP  - {ftp.User}@{ftp.Host}:{ftp.Port}  {ftp.RemotePath}"),
                 new KindChoice(false, sql is null
-                    ? "SQL  — (none — add)"
-                    : $"SQL  — {sql.User}@{sql.Server}/{sql.Database}"),
+                    ? "SQL  - (none - add)"
+                    : $"SQL  - {sql.User}@{sql.Server}/{sql.Database}"),
             };
 
             var menu = new SelectableList<KindChoice>(_screen)
             {
-                Title = $"'{project}' — edit which connection?",
+                Title = $"'{project}' - edit which connection?",
                 Hint = "↑/↓ · Enter · Esc to go back",
                 Items = items,
                 Display = c => c.Label
@@ -91,7 +91,7 @@ internal sealed class ConnectionsView
     private void EditFtp(string project, FtpProfile? current)
     {
         _screen.Clear();
-        _screen.DrawCentredTitle(1, $"{project} — FTP connection", Theme.HeaderFg);
+        _screen.DrawCentredTitle(1, $"{project} - FTP connection", Theme.HeaderFg);
         Console.SetCursorPosition(0, 3);
 
         var host = _text.Show("FTP host", current?.Host);
@@ -117,7 +117,7 @@ internal sealed class ConnectionsView
     private void EditSql(string project, SqlProfile? current)
     {
         _screen.Clear();
-        _screen.DrawCentredTitle(1, $"{project} — SQL connection", Theme.HeaderFg);
+        _screen.DrawCentredTitle(1, $"{project} - SQL connection", Theme.HeaderFg);
         Console.SetCursorPosition(0, 3);
 
         var server = _text.Show("SQL server (host,port)", current?.Server);

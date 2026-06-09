@@ -86,7 +86,7 @@ public sealed class RemoveProjectUseCase
                     reporter.Success($"Deleted {project.ProjectDirectory}");
                 else
                     reporter.Fail(
-                        $"Could not delete {project.ProjectDirectory}. A file is still locked — " +
+                        $"Could not delete {project.ProjectDirectory}. A file is still locked - " +
                         "close anything using it (an open editor/terminal in the folder, a file " +
                         "explorer window, or antivirus) and remove the project again.");
             }

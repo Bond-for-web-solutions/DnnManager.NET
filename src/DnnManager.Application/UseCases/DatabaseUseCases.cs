@@ -44,7 +44,8 @@ public sealed class ExportDatabaseUseCase
                 return Result.Fail("Production export not implemented in this build.");
             }
 
-            if (!_bacpac.IsAvailable()) return Result.Fail(_bacpac.InstallHint);
+            var ensured = await _bacpac.EnsureAvailableAsync(reporter, ct);
+            if (!ensured.Success) return ensured;
 
             Directory.CreateDirectory(p.BackupDirectory);
             var name = $"developer_{DateTime.Now:yyyyMMdd_HHmmss}.bacpac";
@@ -140,7 +141,8 @@ public sealed class ImportDatabaseUseCase
 
         // .bacpac → SqlPackage import. Import always creates a fresh database, so drop any
         // existing copy first (the user already confirmed overwriting), then remap the app login.
-        if (!_bacpac.IsAvailable()) return Result.Fail(_bacpac.InstallHint);
+        var ensured = await _bacpac.EnsureAvailableAsync(reporter, ct);
+        if (!ensured.Success) return ensured;
 
         var exists = await _sql.DatabaseExistsAsync(db.DatabaseName, ct);
         if (exists.Success && exists.Value)
@@ -159,7 +161,7 @@ public sealed class ImportDatabaseUseCase
 
     /// <summary>
     /// Overwrites the production (Azure SQL) database from a .bacpac. Azure cannot RESTORE a native
-    /// .bak, and SqlPackage import cannot overwrite an existing database — so this drops the existing
+    /// .bak, and SqlPackage import cannot overwrite an existing database - so this drops the existing
     /// database and reimports, preserving its edition/service objective so the tier is unchanged.
     /// </summary>
     private async Task<Result> ImportProductionAsync(DnnProject p, string backupFilePath,
@@ -184,7 +186,8 @@ public sealed class ImportDatabaseUseCase
         if (!backupFilePath.EndsWith(".bacpac", StringComparison.OrdinalIgnoreCase))
             return Result.Fail("Azure SQL can only be overwritten from a .bacpac file (native .bak RESTORE is not " +
                                "supported by Azure SQL). Back up a .bacpac first, then overwrite production with it.");
-        if (!_bacpac.IsAvailable()) return Result.Fail(_bacpac.InstallHint);
+        var ensured = await _bacpac.EnsureAvailableAsync(reporter, ct);
+        if (!ensured.Success) return ensured;
 
         var target = new SiteSqlConnection(server, dbName, user, pass);
         var fileName = Path.GetFileName(backupFilePath);
@@ -195,7 +198,7 @@ public sealed class ImportDatabaseUseCase
             return Result.Fail($"Could not connect to production server {server}: {info.Error}");
 
         // Spell out exactly what is at stake, then gate the destructive path behind an explicit
-        // confirmation AND a typed database name — this drops the LIVE production database.
+        // confirmation AND a typed database name - this drops the LIVE production database.
         reporter.Info($"Target: [{dbName}] on {server}  (Azure={info.Value.IsAzure}, " +
                       $"edition={info.Value.Edition ?? "n/a"}, SLO={info.Value.ServiceObjective ?? "n/a"}, " +
                       $"exists={info.Value.Exists}).");
@@ -209,7 +212,7 @@ public sealed class ImportDatabaseUseCase
         // Preserve the existing Azure tier so the recreated database keeps the same edition/SLO
         // (otherwise SqlPackage creates it at the subscription default). An elastic-pool database
         // reports its objective as the literal 'ElasticPool', which SqlPackage cannot honour without
-        // a pool name — skip the tier props in that case and let it create standalone at the default.
+        // a pool name - skip the tier props in that case and let it create standalone at the default.
         var pooled = string.Equals(info.Value.ServiceObjective, "ElasticPool", StringComparison.OrdinalIgnoreCase);
         var props = new Dictionary<string, string>();
         if (info.Value.IsAzure && info.Value.Exists && !pooled)
@@ -219,18 +222,18 @@ public sealed class ImportDatabaseUseCase
         }
         else if (info.Value.IsAzure && info.Value.Exists && pooled)
         {
-            reporter.Info("Source is in an elastic pool — the new copy will be created standalone at the default " +
+            reporter.Info("Source is in an elastic pool - the new copy will be created standalone at the default " +
                           "tier. Move it back into the pool in Azure after the overwrite if required.");
         }
         var sqlPackageProps = props.Count > 0 ? props : null;
 
-        // First push (no existing database) — nothing to protect; import straight into the target.
+        // First push (no existing database) - nothing to protect; import straight into the target.
         if (!info.Value.Exists)
         {
             var firstImport = await _bacpac.ImportAsync(server, user, pass, dbName, backupFilePath, reporter, ct, sqlPackageProps);
             if (!firstImport.Success)
             {
-                // A failed Azure import can leave a partial DB under the production name — drop it.
+                // A failed Azure import can leave a partial DB under the production name - drop it.
                 await TryDropAsync(target, info.Value.IsAzure, reporter);
                 return firstImport;
             }
@@ -246,19 +249,19 @@ public sealed class ImportDatabaseUseCase
         var tempName = $"{dbName}_import_{stamp}";
         var tempTarget = target with { Database = tempName };
 
-        var oldDropped = false; // once true, tempTarget holds the ONLY copy — it must never be dropped.
+        var oldDropped = false; // once true, tempTarget holds the ONLY copy - it must never be dropped.
         var swapped = false;
         try
         {
-            reporter.Info($"Importing into temporary database [{tempName}] — production stays live until the import succeeds.");
+            reporter.Info($"Importing into temporary database [{tempName}] - production stays live until the import succeeds.");
             var import = await _bacpac.ImportAsync(server, user, pass, tempName, backupFilePath, reporter, ct, sqlPackageProps);
             if (!import.Success) return import; // finally drops the temp DB; production untouched.
 
-            // Import succeeded — replace production with the freshly imported copy.
+            // Import succeeded - replace production with the freshly imported copy.
             var dropOld = await _remoteAdmin.DropDatabaseAsync(target, info.Value.IsAzure, reporter, ct);
             if (!dropOld.Success)
                 return Result.Fail($"New data imported as [{tempName}], but the old production database could not be " +
-                                   $"dropped: {dropOld.Error}. Production is unchanged — resolve the issue and retry.");
+                                   $"dropped: {dropOld.Error}. Production is unchanged - resolve the issue and retry.");
             oldDropped = true; // POINT OF NO RETURN: the production name is now free; temp is the only copy.
 
             // Rename temp → prod. We are past the point of no return, so push hard: retry with backoff
@@ -286,7 +289,7 @@ public sealed class ImportDatabaseUseCase
     /// <summary>
     /// Renames a freshly imported temp database into the production name. Runs past the point of no
     /// return (the old DB is already gone), so it uses <see cref="CancellationToken.None"/> and retries
-    /// with backoff — a transient Azure control-plane failure must not abandon the swap mid-flight.
+    /// with backoff - a transient Azure control-plane failure must not abandon the swap mid-flight.
     /// </summary>
     private async Task<Result> RenameWithRetryAsync(SiteSqlConnection conn, string fromName, string toName, IProgressReporter reporter)
     {
