@@ -44,11 +44,29 @@ public sealed class RemoveProjectUseCase
                 return Result.Fail("Aborted by user.");
 
             reporter.Step("Step 1: Remove IIS site & pool");
-            _iis.RemoveSite(projectName);
+            var iisResult = _iis.RemoveSite(projectName);
+            if (!iisResult.Success)
+            {
+                reporter.Fail(
+                    $"Could not remove the IIS site/pool: {iisResult.Error}. Its worker process may " +
+                    "still be holding the project files, so the folder can't be deleted yet. Ensure the " +
+                    "app is running as Administrator and try again.");
+                return iisResult;
+            }
+
+            // The app pool's virtual identity got a Windows user profile auto-created at
+            // C:\Users\<project>. Delete it now that the pool is gone so it doesn't linger. The
+            // worker exited during RemoveSite, so the profile is unloaded and removable.
+            reporter.Step("Step 2: Remove app pool user profile");
+            var profile = await _iis.RemoveAppPoolProfileAsync(projectName, ct);
+            if (profile.Success)
+                reporter.Success($"Removed app pool profile (C:\\Users\\{projectName}) if present.");
+            else
+                reporter.Info($"App pool profile cleanup skipped: {profile.Error}");
 
             if (dropDb)
             {
-                reporter.Step("Step 2: Drop project database");
+                reporter.Step("Step 3: Drop project database");
                 var env = _envFiles.Read(project.EnvFile);
                 var db = new DatabaseConfig(
                     "localhost",
@@ -61,18 +79,16 @@ public sealed class RemoveProjectUseCase
                 await _sql.DropDatabaseAndUserAsync(db, ct);
             }
 
-            reporter.Step("Step 3: Delete project directory");
+            reporter.Step("Step 4: Delete project directory");
             if (Directory.Exists(project.ProjectDirectory))
             {
-                try
-                {
-                    Directory.Delete(project.ProjectDirectory, recursive: true);
+                if (await TryDeleteDirectoryAsync(project.ProjectDirectory, ct))
                     reporter.Success($"Deleted {project.ProjectDirectory}");
-                }
-                catch (Exception ex)
-                {
-                    reporter.Fail($"Could not fully delete: {ex.Message}");
-                }
+                else
+                    reporter.Fail(
+                        $"Could not delete {project.ProjectDirectory}. A file is still locked — " +
+                        "close anything using it (an open editor/terminal in the folder, a file " +
+                        "explorer window, or antivirus) and remove the project again.");
             }
 
             reporter.Step("Removal complete");
@@ -83,5 +99,51 @@ public sealed class RemoveProjectUseCase
             _log.LogError(ex, "Remove failed");
             return Result.Fail(ex.Message);
         }
+    }
+
+    // DNN ships read-only files, and the IIS worker may release its handles a beat after the
+    // app pool reports Stopped, so a single recursive delete often throws. Clear read-only
+    // attributes and retry with backoff to absorb the transient lock.
+    private static async Task<bool> TryDeleteDirectoryAsync(string path, CancellationToken ct)
+    {
+        const int maxAttempts = 8;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                ClearReadOnly(new DirectoryInfo(path));
+                Directory.Delete(path, recursive: true);
+                return true;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                if (attempt >= maxAttempts) return false;
+                // Escalating backoff (capped) to ride out a handle that's still being released.
+                await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(2000, 500 * attempt)), ct);
+            }
+        }
+    }
+
+    private static void ClearReadOnly(DirectoryInfo dir)
+    {
+        // Never follow junctions/symlinks: Directory.Delete(recursive) removes the link itself,
+        // and recursing through a reparse point could loop forever (cycle), blow the stack, or
+        // strip read-only flags off files that live outside the project tree.
+        if ((dir.Attributes & FileAttributes.ReparsePoint) != 0) return;
+
+        TryClearReadOnly(dir);
+        foreach (var file in dir.GetFiles()) TryClearReadOnly(file);
+        foreach (var sub in dir.GetDirectories()) ClearReadOnly(sub);
+    }
+
+    // Best-effort: one re-locked/denied entry shouldn't abort the whole delete attempt.
+    private static void TryClearReadOnly(FileSystemInfo entry)
+    {
+        try
+        {
+            if ((entry.Attributes & FileAttributes.ReadOnly) != 0)
+                entry.Attributes &= ~FileAttributes.ReadOnly;
+        }
+        catch { /* ignore and let Directory.Delete surface anything that actually blocks */ }
     }
 }

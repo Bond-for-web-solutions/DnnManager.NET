@@ -47,6 +47,9 @@ public sealed class ListProjectsUseCase
             int? port = null;
             if (env.TryGetValue("SQLSERVER_PORT", out var portStr) && int.TryParse(portStr, out var pn)) port = pn;
 
+            var siteUrl = $"http://{name}.{_opts.HostnameSuffix}";
+            if (_opts.SitePort != 80) siteUrl += $":{_opts.SitePort}";
+
             list.Add(new ProjectStatus(
                 name,
                 p.ProjectDirectory,
@@ -56,7 +59,8 @@ public sealed class ListProjectsUseCase
                 containerRunning,
                 env.GetValueOrDefault("DB_NAME"),
                 env.GetValueOrDefault("DB_USER"),
-                port));
+                port,
+                siteUrl));
         }
         return list;
     }

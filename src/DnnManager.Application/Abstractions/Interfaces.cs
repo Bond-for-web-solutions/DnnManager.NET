@@ -48,6 +48,15 @@ public interface IIisManager
     bool SiteExists(string siteName);
     string? GetSiteState(string siteName);
     Result GrantPermissions(string path, IEnumerable<string> identities);
+
+    /// <summary>
+    /// Deletes the Windows user profile auto-created for the app pool's virtual identity
+    /// (<c>IIS APPPOOL\&lt;poolName&gt;</c>) — i.e. the leftover <c>C:\Users\&lt;poolName&gt;</c> folder and
+    /// its ProfileList registry entry. Matched strictly by the deterministic app-pool SID, so it
+    /// only ever removes this pool's profile. Best-effort and idempotent: a no-op (still Ok) when no
+    /// such profile exists. Call only after the pool's worker has exited (see <see cref="RemoveSite"/>).
+    /// </summary>
+    Task<Result> RemoveAppPoolProfileAsync(string poolName, CancellationToken ct);
 }
 
 public interface IPrerequisiteChecker

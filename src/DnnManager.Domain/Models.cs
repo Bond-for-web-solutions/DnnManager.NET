@@ -33,7 +33,8 @@ public sealed record ProjectStatus(
     bool ContainerRunning,
     string? DatabaseName,
     string? DatabaseUser,
-    int? SqlPort);
+    int? SqlPort,
+    string SiteUrl);
 
 public sealed record DockerSettings(
     string ContainerName,

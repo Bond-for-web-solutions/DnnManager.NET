@@ -86,6 +86,7 @@ internal sealed class ProjectsListView
             Console.ForegroundColor = Theme.HeaderFg;
             Console.WriteLine($"  ▌ {p.Name}");
             Console.ResetColor();
+            WriteRow("URL",         p.SiteUrl);
             WriteRow("Path",        p.ProjectDirectory);
             WriteRow("Size",        $"{p.DirectorySizeBytes / 1024d / 1024d:N1} MB");
             WriteRow("IIS site",    p.IisSiteExists ? $"present ({p.IisSiteState})" : "(none)");
@@ -102,7 +103,9 @@ internal sealed class ProjectsListView
         Console.ForegroundColor = Theme.Hint;
         Console.Write($"     {k,-12} ");
         Console.ForegroundColor = Theme.Foreground;
-        Console.WriteLine(v);
+        // Linkify so any URL in the value (e.g. the site URL) renders as an OSC 8
+        // clickable hyperlink. No-op for non-URL values.
+        Console.WriteLine(Ansi.Linkify(v));
         Console.ResetColor();
     }
 }
