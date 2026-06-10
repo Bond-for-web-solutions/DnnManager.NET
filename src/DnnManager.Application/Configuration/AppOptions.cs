@@ -26,6 +26,8 @@ public sealed class ConsoleOptions
 public sealed class DockerOptions
 {
     public string ContainerName { get; set; } = "dnn-sqlserver";
+    /// <summary>The container's static IP on the dnn_network bridge - keep in sync with docker-compose.yml.</summary>
+    public string ContainerIp { get; set; } = "127.0.0.1";
     public string VolumeName { get; set; } = "dnn_sqlserver_data";
     public string SaPassword { get; set; } = "Admin@123";
     public int DefaultPort { get; set; } = 1433;
