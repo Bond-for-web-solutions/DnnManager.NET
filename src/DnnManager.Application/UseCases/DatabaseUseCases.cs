@@ -111,15 +111,15 @@ public sealed class ExportDatabaseUseCase
     }
 
     /// <summary>
-    /// The local Docker SQL Server endpoint to connect to as sa (localhost + the shared container's
-    /// currently-published port), or null when the container isn't running. We deliberately do NOT
-    /// fall back to the default port: with the container down there is no local DB to back up, and
-    /// blindly targeting 1433 could hit an unrelated SQL Server listening there.
+    /// The local Docker SQL Server endpoint to connect to as sa (the configured container IP + the
+    /// shared container's currently-published port), or null when the container isn't running. We
+    /// deliberately do NOT fall back to the default port: with the container down there is no local DB
+    /// to back up, and blindly targeting it could hit an unrelated SQL Server listening there.
     /// </summary>
     private async Task<string?> ResolveLocalServerAsync(CancellationToken ct)
     {
         var port = await _docker.GetPublishedPortAsync(_opts.Docker.ContainerName, ct);
-        return port is null ? null : $"localhost,{port}";
+        return port is null ? null : $"{_opts.Docker.ContainerIp},{port}";
     }
 }
 
@@ -176,7 +176,7 @@ public sealed class ImportDatabaseUseCase
         if (port is null)
             return Result.Fail($"The shared SQL Server container '{_opts.Docker.ContainerName}' isn't running - start it and retry.");
         var db = new DatabaseConfig(
-            $"localhost,{port.Value}",
+            $"{_opts.Docker.ContainerIp},{port.Value}",
             dbName,
             _opts.Docker.Collation,
             port.Value,

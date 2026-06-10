@@ -212,7 +212,7 @@ public sealed class CloneProjectUseCase
 
             // 6) Create the local database (by name only; the site connects as the container sa)
             var db = new DatabaseConfig(
-                Server: $"localhost,{port}",
+                Server: $"{_opts.Docker.ContainerIp},{port}",
                 DatabaseName: req.TargetProjectName + _opts.Docker.DefaultDbNameSuffix,
                 Collation: _opts.Docker.Collation,
                 Port: port,
@@ -243,7 +243,7 @@ public sealed class CloneProjectUseCase
                 var cached = Path.Combine(project.BackupDirectory, $"clone_{stamp}_{req.TargetProjectName}.bacpac");
                 try { File.Copy(bacpacTmp, cached, overwrite: true); reporter.Info($"Cached BACPAC at {cached}"); } catch { }
 
-                var import = await _bacpac.ImportAsync($"localhost,{port}", "sa", _opts.Docker.SaPassword,
+                var import = await _bacpac.ImportAsync($"{_opts.Docker.ContainerIp},{port}", "sa", _opts.Docker.SaPassword,
                     db.DatabaseName, bacpacTmp, reporter, ct);
                 if (!import.Success) return import;
 
@@ -363,6 +363,7 @@ public sealed class CloneProjectUseCase
         }
 
         var isLocalHost =
+            string.Equals(host, _opts.Docker.ContainerIp, StringComparison.OrdinalIgnoreCase) ||
             string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(host, "127.0.0.1", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(host, "(local)",   StringComparison.OrdinalIgnoreCase) ||

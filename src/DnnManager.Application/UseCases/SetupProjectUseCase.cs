@@ -137,7 +137,7 @@ public sealed class SetupProjectUseCase
             }
             else
             {
-                reporter.Info($"In the DNN install wizard, connect to: server 'localhost,{port}', " +
+                reporter.Info($"In the DNN install wizard, connect to: server '{_opts.Docker.ContainerIp},{port}', " +
                               $"database '{req.ProjectName}{_opts.Docker.DefaultDbNameSuffix}', " +
                               $"user 'sa', password '{_opts.Docker.SaPassword}'.");
             }
@@ -170,7 +170,7 @@ public sealed class SetupProjectUseCase
 
     private DatabaseConfig MakeDbConfig(SetupProjectRequest req, DnnProject project, int port) =>
         new(
-            Server: $"localhost,{port}",
+            Server: $"{_opts.Docker.ContainerIp},{port}",
             DatabaseName: req.ProjectName + _opts.Docker.DefaultDbNameSuffix,
             Collation: _opts.Docker.Collation,
             Port: port,
@@ -243,7 +243,7 @@ public sealed class SetupProjectUseCase
             }
             var created = await _sql.CreateDatabaseAsync(db, ct);
             if (created.Success)
-                reporter.Success($"Database '{db.DatabaseName}' ready on localhost,{port}.");
+                reporter.Success($"Database '{db.DatabaseName}' ready on {_opts.Docker.ContainerIp},{port}.");
             else
                 reporter.Fail($"Database creation reported an error: {created.Error}");
         }
