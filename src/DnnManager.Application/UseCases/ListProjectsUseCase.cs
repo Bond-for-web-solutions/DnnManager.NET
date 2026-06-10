@@ -11,31 +11,32 @@ public sealed class ListProjectsUseCase
     private readonly IProjectRepository _projects;
     private readonly IIisManager _iis;
     private readonly IDockerService _docker;
-    private readonly IEnvFileService _envFiles;
+    private readonly IWebConfigService _webConfig;
 
     public ListProjectsUseCase(
         IOptions<AppOptions> opts,
         IProjectRepository projects,
         IIisManager iis,
         IDockerService docker,
-        IEnvFileService envFiles)
+        IWebConfigService webConfig)
     {
         _opts = opts.Value;
         _projects = projects;
         _iis = iis;
         _docker = docker;
-        _envFiles = envFiles;
+        _webConfig = webConfig;
     }
 
     public async Task<IReadOnlyList<ProjectStatus>> ExecuteAsync(CancellationToken ct)
     {
         var list = new List<ProjectStatus>();
         var containerRunning = await _docker.IsContainerRunningAsync(_opts.Docker.ContainerName, ct);
+        // One shared SQL container, so its published port (when up) applies to every project.
+        int? sqlPort = containerRunning ? await _docker.GetPublishedPortAsync(_opts.Docker.ContainerName, ct) : null;
 
         foreach (var name in _projects.ListAllProjectDirectories())
         {
             var p = _projects.Build(name);
-            var env = File.Exists(p.EnvFile) ? _envFiles.Read(p.EnvFile) : (IReadOnlyDictionary<string, string>)new Dictionary<string, string>();
             long size = 0;
             try
             {
@@ -44,8 +45,10 @@ public sealed class ListProjectsUseCase
             }
             catch { /* ignore */ }
 
-            int? port = null;
-            if (env.TryGetValue("SQLSERVER_PORT", out var portStr) && int.TryParse(portStr, out var pn)) port = pn;
+            // The database the site uses comes from its web.config; before the DNN wizard wires that
+            // up, fall back to the conventional {project}_dnndev name setup creates. The site always
+            // connects as the container sa.
+            var dbName = DeveloperDb.FromWebConfig(p, _webConfig) ?? (name + _opts.Docker.DefaultDbNameSuffix);
 
             var siteUrl = $"http://{name}.{_opts.HostnameSuffix}";
             if (_opts.SitePort != 80) siteUrl += $":{_opts.SitePort}";
@@ -57,9 +60,9 @@ public sealed class ListProjectsUseCase
                 _iis.GetSiteState(name),
                 size,
                 containerRunning,
-                env.GetValueOrDefault("DB_NAME"),
-                env.GetValueOrDefault("DB_USER"),
-                port,
+                dbName,
+                "sa",
+                sqlPort,
                 siteUrl));
         }
         return list;

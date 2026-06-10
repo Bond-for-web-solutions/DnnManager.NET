@@ -61,32 +61,25 @@ public sealed class SqlServerService : ISqlServerService
         return Result<bool>.Ok(r.StdOut.Contains("EXISTS", StringComparison.Ordinal));
     }
 
-    public async Task<Result> CreateDatabaseAndUserAsync(DatabaseConfig db, CancellationToken ct)
+    public async Task<Result> CreateDatabaseAsync(DatabaseConfig db, CancellationToken ct)
     {
-        var sql1 = $@"
+        // Create the database by name only. The DNN site (and this tool) connect as the container's
+        // sa, so there is no per-project SQL login/user to provision.
+        var sql = $@"
 IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = N'{db.DatabaseName}')
-BEGIN CREATE DATABASE [{db.DatabaseName}] COLLATE {db.Collation}; END
-IF NOT EXISTS (SELECT name FROM sys.server_principals WHERE name = N'{db.User}')
-BEGIN CREATE LOGIN [{db.User}] WITH PASSWORD = N'{db.Password}', DEFAULT_DATABASE = [{db.DatabaseName}]; END";
-        var r1 = await SqlcmdAsync(null, null, null, sql1, ct);
-        if (!r1.Success) return Result.Fail(r1.StdErr);
-
-        var sql2 = $@"
-IF NOT EXISTS (SELECT name FROM sys.database_principals WHERE name = N'{db.User}')
-BEGIN CREATE USER [{db.User}] FOR LOGIN [{db.User}]; ALTER ROLE db_owner ADD MEMBER [{db.User}]; END";
-        var r2 = await SqlcmdAsync(null, null, db.DatabaseName, sql2, ct);
-        return r2.Success ? Result.Ok() : Result.Fail(r2.StdErr);
+BEGIN CREATE DATABASE [{db.DatabaseName}] COLLATE {db.Collation}; END";
+        var r = await SqlcmdAsync(null, null, null, sql, ct);
+        return r.Success ? Result.Ok() : Result.Fail(r.StdErr);
     }
 
-    public async Task<Result> DropDatabaseAndUserAsync(DatabaseConfig db, CancellationToken ct)
+    public async Task<Result> DropDatabaseAsync(string database, CancellationToken ct)
     {
         var sql = $@"
-IF EXISTS (SELECT name FROM sys.databases WHERE name = N'{db.DatabaseName}')
+IF EXISTS (SELECT name FROM sys.databases WHERE name = N'{database}')
 BEGIN
-  ALTER DATABASE [{db.DatabaseName}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
-  DROP DATABASE [{db.DatabaseName}];
-END
-IF EXISTS (SELECT name FROM sys.server_principals WHERE name = N'{db.User}') DROP LOGIN [{db.User}];";
+  ALTER DATABASE [{database}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+  DROP DATABASE [{database}];
+END";
         var r = await SqlcmdAsync(null, null, null, sql, ct);
         return r.Success ? Result.Ok() : Result.Fail(r.StdErr);
     }
@@ -151,19 +144,14 @@ SELECT LogicalName + '|' + Type FROM @t;";
         }
         if (moves.Count == 0) return Result.Fail("Could not read backup file list.");
 
+        // No per-project login to remap: the site connects as the container's sa (a sysadmin),
+        // which can access the restored database regardless of the user mappings it carries.
         var restoreSql = $@"
 IF EXISTS (SELECT 1 FROM sys.databases WHERE name = N'{db.DatabaseName}')
   ALTER DATABASE [{db.DatabaseName}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
 RESTORE DATABASE [{db.DatabaseName}] FROM DISK = N'{containerPath}' WITH REPLACE, {string.Join(", ", moves)}, STATS = 10;
 IF EXISTS (SELECT 1 FROM sys.databases WHERE name = N'{db.DatabaseName}')
-  ALTER DATABASE [{db.DatabaseName}] SET MULTI_USER;
--- After RESTORE, the database carries user mappings from the source server.
--- Remap our local login as db_owner of the restored DB so the app can connect.
-USE [{db.DatabaseName}];
-IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'{db.User}')
-  DROP USER [{db.User}];
-CREATE USER [{db.User}] FOR LOGIN [{db.User}];
-ALTER ROLE db_owner ADD MEMBER [{db.User}];";
+  ALTER DATABASE [{db.DatabaseName}] SET MULTI_USER;";
         var rr = await SqlcmdAsync(null, null, null, restoreSql, ct);
         await _proc.RunAsync("docker", new[] { "exec", Container, "rm", "-f", containerPath }, ct);
         return rr.Success ? Result.Ok() : Result.Fail(rr.StdErr);

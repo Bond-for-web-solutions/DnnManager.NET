@@ -31,8 +31,6 @@ public sealed class DockerOptions
     public int DefaultPort { get; set; } = 1433;
     public string Collation { get; set; } = "Latin1_General_CI_AS";
     public string MssqlPid { get; set; } = "Developer";
-    public string DefaultDbPassword { get; set; } = "Dnnd3v@123";
-    public string DefaultDbUserSuffix { get; set; } = "_user";
     public string DefaultDbNameSuffix { get; set; } = "_dnndev";
 }
 

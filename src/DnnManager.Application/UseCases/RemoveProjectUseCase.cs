@@ -12,7 +12,7 @@ public sealed class RemoveProjectUseCase
     private readonly IProjectRepository _projects;
     private readonly IIisManager _iis;
     private readonly ISqlServerService _sql;
-    private readonly IEnvFileService _envFiles;
+    private readonly IWebConfigService _webConfig;
     private readonly IUserPrompt _prompt;
     private readonly ILogger<RemoveProjectUseCase> _log;
 
@@ -21,7 +21,7 @@ public sealed class RemoveProjectUseCase
         IProjectRepository projects,
         IIisManager iis,
         ISqlServerService sql,
-        IEnvFileService envFiles,
+        IWebConfigService webConfig,
         IUserPrompt prompt,
         ILogger<RemoveProjectUseCase> log)
     {
@@ -29,7 +29,7 @@ public sealed class RemoveProjectUseCase
         _projects = projects;
         _iis = iis;
         _sql = sql;
-        _envFiles = envFiles;
+        _webConfig = webConfig;
         _prompt = prompt;
         _log = log;
     }
@@ -67,16 +67,10 @@ public sealed class RemoveProjectUseCase
             if (dropDb)
             {
                 reporter.Step("Step 3: Drop project database");
-                var env = _envFiles.Read(project.EnvFile);
-                var db = new DatabaseConfig(
-                    "localhost",
-                    env.GetValueOrDefault("DB_NAME", projectName + _opts.Docker.DefaultDbNameSuffix),
-                    env.GetValueOrDefault("DB_USER", projectName + _opts.Docker.DefaultDbUserSuffix),
-                    env.GetValueOrDefault("DB_PASSWORD", _opts.Docker.DefaultDbPassword),
-                    _opts.Docker.Collation,
-                    int.TryParse(env.GetValueOrDefault("SQLSERVER_PORT", ""), out var p) ? p : _opts.Docker.DefaultPort,
-                    project.BackupDirectory);
-                await _sql.DropDatabaseAndUserAsync(db, ct);
+                // Drop the database the site uses (web.config SiteSqlServer), falling back to the
+                // conventional {project}_dnndev name. Read it before the directory is deleted below.
+                var dbName = DeveloperDb.FromWebConfig(project, _webConfig) ?? (projectName + _opts.Docker.DefaultDbNameSuffix);
+                await _sql.DropDatabaseAsync(dbName, ct);
             }
 
             reporter.Step("Step 4: Delete project directory");

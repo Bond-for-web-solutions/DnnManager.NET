@@ -37,9 +37,7 @@ public sealed class CloneProjectUseCase
     private readonly IRemoteSqlBackupService _remoteBackup;
     private readonly IBacpacService _bacpac;
     private readonly IDockerService _docker;
-    private readonly IDockerConfigWriter _dockerCfg;
     private readonly ISqlServerService _sql;
-    private readonly IEnvFileService _envFiles;
     private readonly IIisManager _iis;
     private readonly IPrerequisiteChecker _prereq;
     private readonly IUserPrompt _prompt;
@@ -53,9 +51,7 @@ public sealed class CloneProjectUseCase
         IRemoteSqlBackupService remoteBackup,
         IBacpacService bacpac,
         IDockerService docker,
-        IDockerConfigWriter dockerCfg,
         ISqlServerService sql,
-        IEnvFileService envFiles,
         IIisManager iis,
         IPrerequisiteChecker prereq,
         IUserPrompt prompt,
@@ -68,9 +64,7 @@ public sealed class CloneProjectUseCase
         _remoteBackup = remoteBackup;
         _bacpac = bacpac;
         _docker = docker;
-        _dockerCfg = dockerCfg;
         _sql = sql;
-        _envFiles = envFiles;
         _iis = iis;
         _prereq = prereq;
         _prompt = prompt;
@@ -120,25 +114,16 @@ public sealed class CloneProjectUseCase
                 dockerAvailable = (await _prereq.CheckDockerAsync(reporter, ct)).Success;
                 if (!dockerAvailable)
                     reporter.Info("Docker not found - skipping database seeding. The cloned files are kept; " +
-                                  "configure a database and update the site's web.config/.env yourself.");
+                                  "configure a database and point the site's web.config at it yourself.");
             }
 
             if (!req.SeedDatabase || !dockerAvailable)
             {
                 if (!req.SeedDatabase)
                     reporter.Info("Skipping database - website files only.");
-
-                // Still lay down env files so the project is complete and editable later.
-                var fallbackDb = new DatabaseConfig(
-                    Server: $"localhost,{_opts.Docker.DefaultPort}",
-                    DatabaseName: req.TargetProjectName + _opts.Docker.DefaultDbNameSuffix,
-                    User: req.TargetProjectName + _opts.Docker.DefaultDbUserSuffix,
-                    Password: _opts.Docker.DefaultDbPassword,
-                    Collation: _opts.Docker.Collation,
-                    Port: _opts.Docker.DefaultPort,
-                    BackupDirectory: project.BackupDirectory);
-                await _envFiles.EnsureDeveloperEnvAsync(project, fallbackDb, ct);
-                await _envFiles.EnsureProductionEnvAsync(project, ct);
+                else
+                    reporter.Info("Docker unavailable - the cloned files are kept; point the site's " +
+                                  "web.config at a database yourself.");
             }
             else
             {
@@ -197,7 +182,6 @@ public sealed class CloneProjectUseCase
             var containerExists = await _docker.DoesContainerExistAsync(containerName, ct);
             var containerRunning = containerExists && await _docker.IsContainerRunningAsync(containerName, ct);
 
-            int port;
             if (containerExists)
             {
                 if (!containerRunning)
@@ -210,28 +194,26 @@ public sealed class CloneProjectUseCase
                 {
                     reporter.Info($"Reusing running SQL Server container '{containerName}'.");
                 }
-                var existingPort = await _docker.GetPublishedPortAsync(containerName, ct);
-                if (existingPort is null) return Result.Fail($"Could not determine published port for '{containerName}'.");
-                port = existingPort.Value;
-                await _dockerCfg.WriteAsync(project, port, ct);
             }
             else
             {
-                port = FindFreePort(_opts.Docker.DefaultPort);
-                await _dockerCfg.WriteAsync(project, port, ct);
-                var up = await _docker.ComposeUpAsync(project.ComposeFile, project.EnvFile, "dnn-shared", ct);
+                // Bring up the shared container from the docker-compose.yml shipped with the app.
+                var up = await _docker.ComposeUpAsync(ct);
                 if (!up.Success) return up;
             }
+
+            // The shared container publishes the fixed port (1433); read it back to be certain.
+            var existingPort = await _docker.GetPublishedPortAsync(containerName, ct);
+            if (existingPort is null) return Result.Fail($"Could not determine published port for '{containerName}'.");
+            var port = existingPort.Value;
 
             var ready = await _sql.WaitReadyAsync(180, reporter, ct);
             if (!ready.Success) return ready;
 
-            // 6) Create local DB + user
+            // 6) Create the local database (by name only; the site connects as the container sa)
             var db = new DatabaseConfig(
                 Server: $"localhost,{port}",
                 DatabaseName: req.TargetProjectName + _opts.Docker.DefaultDbNameSuffix,
-                User: req.TargetProjectName + _opts.Docker.DefaultDbUserSuffix,
-                Password: _opts.Docker.DefaultDbPassword,
                 Collation: _opts.Docker.Collation,
                 Port: port,
                 BackupDirectory: project.BackupDirectory);
@@ -242,7 +224,7 @@ public sealed class CloneProjectUseCase
             if (exists.Success && exists.Value)
             {
                 reporter.Info($"Local database [{db.DatabaseName}] exists - dropping and recreating.");
-                var drop = await _sql.DropDatabaseAndUserAsync(db, ct);
+                var drop = await _sql.DropDatabaseAsync(db.DatabaseName, ct);
                 if (!drop.Success) return drop;
             }
 
@@ -265,16 +247,14 @@ public sealed class CloneProjectUseCase
                     db.DatabaseName, bacpacTmp, reporter, ct);
                 if (!import.Success) return import;
 
-                // Import created the database; create the login and map the app user.
-                var cu = await _sql.CreateDatabaseAndUserAsync(db, ct);
-                if (!cu.Success) return cu;
-
+                // The BACPAC import already created the database; the site connects as the container
+                // sa, so there is no login/user to provision afterwards.
                 try { File.Delete(bacpacTmp); } catch { /* best effort */ }
                 reporter.Success($"Local database [{db.DatabaseName}] ready (from BACPAC).");
             }
             else
             {
-                var create = await _sql.CreateDatabaseAndUserAsync(db, ct);
+                var create = await _sql.CreateDatabaseAsync(db, ct);
                 if (!create.Success) return create;
                 reporter.Success($"Local database [{db.DatabaseName}] ready.");
 
@@ -318,16 +298,12 @@ public sealed class CloneProjectUseCase
             if (!alias.Success) return alias;
             reporter.Success($"PortalAlias set to {hostname}.");
 
-            // 8) Rewrite web.config to point at the local DB
+            // 8) Rewrite web.config to point at the local DB, connecting as the container sa.
             reporter.Step("Rewriting web.config to use local database");
-            var newConn = new SiteSqlConnection(db.Server, db.DatabaseName, db.User, db.Password);
+            var newConn = new SiteSqlConnection(db.Server, db.DatabaseName, "sa", _opts.Docker.SaPassword);
             var write = _webConfig.WriteSiteSqlServer(webConfigPath, newConn);
             if (!write.Success) return write;
             reporter.Success("web.config updated.");
-
-            // 9) Env files for future Backup/Overwrite operations
-            await _envFiles.EnsureDeveloperEnvAsync(project, db, ct);
-            await _envFiles.EnsureProductionEnvAsync(project, ct);
             } // end database block (req.SeedDatabase)
 
             // 10) Optional IIS site - skipped (not fatal) when IIS is absent or creation fails.
@@ -402,23 +378,5 @@ public sealed class CloneProjectUseCase
         // If the source string includes an explicit port, it must match.
         if (port.HasValue && port.Value != pubPort.Value) return false;
         return true;
-    }
-
-    private static int FindFreePort(int preferred)
-    {
-        try
-        {
-            using var l = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Any, preferred);
-            l.Start(); l.Stop();
-            return preferred;
-        }
-        catch
-        {
-            using var l = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
-            l.Start();
-            var p = ((System.Net.IPEndPoint)l.LocalEndpoint).Port;
-            l.Stop();
-            return p;
-        }
     }
 }

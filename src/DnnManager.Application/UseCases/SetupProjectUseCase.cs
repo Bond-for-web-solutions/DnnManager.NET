@@ -21,9 +21,7 @@ public sealed class SetupProjectUseCase
     private readonly IDnnPackageInstaller _installer;
     private readonly IIisManager _iis;
     private readonly IDockerService _docker;
-    private readonly IDockerConfigWriter _dockerCfg;
     private readonly ISqlServerService _sql;
-    private readonly IEnvFileService _envFiles;
     private readonly IHttpConnectivityChecker _http;
     private readonly IPrerequisiteChecker _prereq;
     private readonly IUserPrompt _prompt;
@@ -36,9 +34,7 @@ public sealed class SetupProjectUseCase
         IDnnPackageInstaller installer,
         IIisManager iis,
         IDockerService docker,
-        IDockerConfigWriter dockerCfg,
         ISqlServerService sql,
-        IEnvFileService envFiles,
         IHttpConnectivityChecker http,
         IPrerequisiteChecker prereq,
         IUserPrompt prompt,
@@ -50,9 +46,7 @@ public sealed class SetupProjectUseCase
         _installer = installer;
         _iis = iis;
         _docker = docker;
-        _dockerCfg = dockerCfg;
         _sql = sql;
-        _envFiles = envFiles;
         _http = http;
         _prereq = prereq;
         _prompt = prompt;
@@ -69,7 +63,7 @@ public sealed class SetupProjectUseCase
             var dockerAvailable = (await _prereq.CheckDockerAsync(reporter, ct)).Success;
             if (!dockerAvailable)
                 reporter.Info("Docker not found - skipping SQL Server/database provisioning. " +
-                              "Edit the project's .env files to point at your own database later.");
+                              "Start Docker and re-run setup, or point the site's web.config at your own database.");
 
             var iisAvailable = _iis.IsAvailable();
             if (iisAvailable)
@@ -130,25 +124,23 @@ public sealed class SetupProjectUseCase
                 reporter.Info("Skipped - IIS not available.");
             }
 
-            reporter.Step("Step 6: Database & environment files");
+            reporter.Step("Step 6: Database");
             // Provision the SQL container/database only when Docker is present; otherwise fall back
-            // to the default port so the env files still carry sensible (editable) values.
+            // to the default port for the wizard instructions.
             var port = dockerAvailable
                 ? await TryProvisionDatabaseAsync(req, project, reporter, ct)
                 : _opts.Docker.DefaultPort;
             if (!dockerAvailable)
             {
-                // Still emit the compose config (pure file output) so the project is ready to
-                // `docker compose up` once Docker is installed \u2014 we just don't start it now.
-                await _dockerCfg.WriteAsync(project, port, ct);
-                reporter.Info("Skipped database provisioning \u2014 Docker not available. Wrote " +
-                              "docker-compose config; install Docker and run compose to start SQL Server.");
+                reporter.Info("Skipped database provisioning \u2014 Docker not available. Start Docker and " +
+                              "re-run setup to create the database.");
             }
-
-            // Always write the env files so the project is complete and the user can wire up a DB.
-            var db = MakeDbConfig(req, project, port);
-            await _envFiles.EnsureDeveloperEnvAsync(project, db, ct);
-            await _envFiles.EnsureProductionEnvAsync(project, ct);
+            else
+            {
+                reporter.Info($"In the DNN install wizard, connect to: server 'localhost,{port}', " +
+                              $"database '{req.ProjectName}{_opts.Docker.DefaultDbNameSuffix}', " +
+                              $"user 'sa', password '{_opts.Docker.SaPassword}'.");
+            }
 
             if (siteCreated)
             {
@@ -180,15 +172,13 @@ public sealed class SetupProjectUseCase
         new(
             Server: $"localhost,{port}",
             DatabaseName: req.ProjectName + _opts.Docker.DefaultDbNameSuffix,
-            User: req.ProjectName + _opts.Docker.DefaultDbUserSuffix,
-            Password: _opts.Docker.DefaultDbPassword,
             Collation: _opts.Docker.Collation,
             Port: port,
             BackupDirectory: project.BackupDirectory);
 
     // Best-effort SQL provisioning: starts/reuses the shared container, waits for SQL, and creates
-    // the project's database + user. Any sub-step failure is reported and skipped (not fatal) so the
-    // overall setup can still finish; returns the port to record in the env files.
+    // the project's database (by name only; the site connects as sa). Any sub-step failure is
+    // reported and skipped (not fatal) so the overall setup can still finish; returns the published port.
     private async Task<int> TryProvisionDatabaseAsync(
         SetupProjectRequest req, DnnProject project, IProgressReporter reporter, CancellationToken ct)
     {
@@ -201,8 +191,7 @@ public sealed class SetupProjectUseCase
 
             if (containerExists)
             {
-                // Reuse the existing shared SQL Server container instead of failing with a name
-                // conflict on `docker compose up`. Just provision a new database/user inside it.
+                // Reuse the existing shared SQL Server container. Just provision a new database inside it.
                 if (!containerRunning)
                 {
                     reporter.Info($"Container '{containerName}' exists but is stopped - starting it.");
@@ -217,28 +206,26 @@ public sealed class SetupProjectUseCase
                 {
                     reporter.Info($"Reusing running SQL Server container '{containerName}'.");
                 }
-
-                var existingPort = await _docker.GetPublishedPortAsync(containerName, ct);
-                if (existingPort is null)
-                {
-                    reporter.Fail($"Could not determine published port for '{containerName}'. Skipping database setup.");
-                    return port;
-                }
-                port = existingPort.Value;
-                await _dockerCfg.WriteAsync(project, port, ct);
             }
             else
             {
-                port = FindFreePort(_opts.Docker.DefaultPort);
-                await _dockerCfg.WriteAsync(project, port, ct);
-
-                var up = await _docker.ComposeUpAsync(project.ComposeFile, project.EnvFile, "dnn-shared", ct);
+                // Bring up the shared container from the docker-compose.yml shipped with the app.
+                var up = await _docker.ComposeUpAsync(ct);
                 if (!up.Success)
                 {
                     reporter.Fail($"docker compose up failed: {up.Error}. Skipping database setup.");
                     return port;
                 }
             }
+
+            // The shared container publishes the fixed port (1433); read it back to be certain.
+            var existingPort = await _docker.GetPublishedPortAsync(containerName, ct);
+            if (existingPort is null)
+            {
+                reporter.Fail($"Could not determine published port for '{containerName}'. Skipping database setup.");
+                return port;
+            }
+            port = existingPort.Value;
 
             var ready = await _sql.WaitReadyAsync(180, reporter, ct);
             if (!ready.Success)
@@ -252,9 +239,9 @@ public sealed class SetupProjectUseCase
             if (exists.Success && exists.Value &&
                 await _prompt.ConfirmAsync($"Database '{db.DatabaseName}' exists. Drop and recreate?", false, ct))
             {
-                await _sql.DropDatabaseAndUserAsync(db, ct);
+                await _sql.DropDatabaseAsync(db.DatabaseName, ct);
             }
-            var created = await _sql.CreateDatabaseAndUserAsync(db, ct);
+            var created = await _sql.CreateDatabaseAsync(db, ct);
             if (created.Success)
                 reporter.Success($"Database '{db.DatabaseName}' ready on localhost,{port}.");
             else
@@ -266,23 +253,5 @@ public sealed class SetupProjectUseCase
             reporter.Fail($"Database setup skipped: {ex.Message}");
         }
         return port;
-    }
-
-    private static int FindFreePort(int preferred)
-    {
-        try
-        {
-            using var l = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Any, preferred);
-            l.Start(); l.Stop();
-            return preferred;
-        }
-        catch
-        {
-            using var l = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
-            l.Start();
-            var p = ((System.Net.IPEndPoint)l.LocalEndpoint).Port;
-            l.Stop();
-            return p;
-        }
     }
 }

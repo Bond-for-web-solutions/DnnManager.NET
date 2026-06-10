@@ -76,22 +76,22 @@ public interface IDockerService
     Task<bool> DoesContainerExistAsync(string containerName, CancellationToken ct);
     Task<int?> GetPublishedPortAsync(string containerName, CancellationToken ct);
     Task<Result> StartContainerAsync(string containerName, CancellationToken ct);
-    Task<Result> ComposeUpAsync(string composeFile, string envFile, string projectName, CancellationToken ct);
-    Task<Result> ComposeDownAsync(string composeFile, string envFile, bool removeVolumes, CancellationToken ct);
-    Task<Result<string>> ExecAsync(string containerName, IReadOnlyList<string> args, CancellationToken ct);
-}
 
-public interface IDockerConfigWriter
-{
-    Task WriteAsync(DnnProject project, int sqlPort, CancellationToken ct);
+    /// <summary>Brings up the shared SQL container from the docker-compose.yml shipped next to the app.</summary>
+    Task<Result> ComposeUpAsync(CancellationToken ct);
+
+    /// <summary>Tears down the shared SQL container (optionally removing its volume).</summary>
+    Task<Result> ComposeDownAsync(bool removeVolumes, CancellationToken ct);
+
+    Task<Result<string>> ExecAsync(string containerName, IReadOnlyList<string> args, CancellationToken ct);
 }
 
 public interface ISqlServerService
 {
     Task<Result> WaitReadyAsync(int timeoutSeconds, IProgressReporter reporter, CancellationToken ct);
     Task<Result<bool>> DatabaseExistsAsync(string database, CancellationToken ct);
-    Task<Result> CreateDatabaseAndUserAsync(DatabaseConfig db, CancellationToken ct);
-    Task<Result> DropDatabaseAndUserAsync(DatabaseConfig db, CancellationToken ct);
+    Task<Result> CreateDatabaseAsync(DatabaseConfig db, CancellationToken ct);
+    Task<Result> DropDatabaseAsync(string database, CancellationToken ct);
     Task<Result<string>> BackupDatabaseLocalAsync(string database, string backupFileName, CancellationToken ct);
     Task<Result> RestoreDatabaseLocalAsync(DatabaseConfig db, string backupFilePath, CancellationToken ct);
 
@@ -101,14 +101,6 @@ public interface ISqlServerService
     /// site responds at its own host header instead of the source's.
     /// </summary>
     Task<Result> RemapPortalAliasesAsync(string database, string hostnameSuffix, string newHostname, CancellationToken ct);
-}
-
-public interface IEnvFileService
-{
-    IReadOnlyDictionary<string, string> Read(string path);
-    Task WriteAsync(string path, IReadOnlyDictionary<string, string> values, string? header, CancellationToken ct);
-    Task EnsureDeveloperEnvAsync(DnnProject project, DatabaseConfig db, CancellationToken ct);
-    Task EnsureProductionEnvAsync(DnnProject project, CancellationToken ct);
 }
 
 public interface IHttpConnectivityChecker

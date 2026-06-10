@@ -6,22 +6,55 @@ using Microsoft.Extensions.Options;
 
 namespace DnnManager.Application.UseCases;
 
+/// <summary>
+/// Shared helpers for resolving a developer project's local database from its configuration, so the
+/// backup (export) and restore (import) paths agree on which database the site actually uses.
+/// </summary>
+internal static class DeveloperDb
+{
+    /// <summary>
+    /// The database the project's site actually connects to: the Initial Catalog of the SiteSqlServer
+    /// connection string in the project's web.config. Returns null when web.config has no usable SQL
+    /// connection (LocalDB, missing file, or unparseable), so callers fall back to the conventional
+    /// {project}_dnndev name. Only the database NAME is taken from web.config - never the server,
+    /// because the local export authenticates as the Docker sa and web.config's Data Source may point elsewhere.
+    /// </summary>
+    public static string? FromWebConfig(DnnProject project, IWebConfigService webConfig)
+    {
+        var conn = webConfig.ReadSiteSqlServer(Path.Combine(project.ProjectDirectory, "web.config"));
+        return conn.Success && conn.Value is not null && !string.IsNullOrWhiteSpace(conn.Value.Database)
+            ? conn.Value.Database
+            : null;
+    }
+
+    /// <summary>Makes a database name safe to embed in a backup file name.</summary>
+    public static string SanitizeForFileName(string dbName)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var cleaned = string.Concat(dbName.Select(c => invalid.Contains(c) ? '_' : c));
+        return string.IsNullOrWhiteSpace(cleaned) ? "db" : cleaned;
+    }
+}
+
 public sealed class ExportDatabaseUseCase
 {
     private readonly AppOptions _opts;
     private readonly IProjectRepository _projects;
-    private readonly IEnvFileService _envFiles;
+    private readonly IWebConfigService _webConfig;
+    private readonly IDockerService _docker;
     private readonly IBacpacService _bacpac;
     private readonly ILogger<ExportDatabaseUseCase> _log;
 
     public ExportDatabaseUseCase(
         IOptions<AppOptions> opts,
         IProjectRepository projects,
-        IEnvFileService envFiles,
+        IWebConfigService webConfig,
+        IDockerService docker,
         IBacpacService bacpac,
         ILogger<ExportDatabaseUseCase> log)
     {
-        _opts = opts.Value; _projects = projects; _envFiles = envFiles; _bacpac = bacpac; _log = log;
+        _opts = opts.Value; _projects = projects; _webConfig = webConfig; _docker = docker;
+        _bacpac = bacpac; _log = log;
     }
 
     public async Task<Result> ExecuteAsync(string projectName, DnnEnvironment env, IProgressReporter reporter, CancellationToken ct)
@@ -29,13 +62,6 @@ public sealed class ExportDatabaseUseCase
         try
         {
             var p = _projects.Build(projectName);
-            var envPath = env == DnnEnvironment.Developer ? p.DeveloperEnvFile : p.ProductionEnvFile;
-            if (!File.Exists(envPath))
-                return Result.Fail($"Env file missing: {envPath}");
-
-            var cfg = _envFiles.Read(envPath);
-            var dbName = cfg.GetValueOrDefault("DB_NAME") ?? "";
-            if (string.IsNullOrEmpty(dbName)) return Result.Fail("DB_NAME not set in env file.");
 
             if (env != DnnEnvironment.Developer)
             {
@@ -44,24 +70,32 @@ public sealed class ExportDatabaseUseCase
                 return Result.Fail("Production export not implemented in this build.");
             }
 
+            // Back up whatever database the project's site actually connects to: take the database
+            // NAME from the SiteSqlServer connection string in the project's web.config (falling back
+            // to the conventional {project}_dnndev name). The SERVER is always the local Docker SQL
+            // Server - we authenticate as its sa, so we must not trust web.config's Data Source, which
+            // may be a named instance / alias / stale port the Docker sa can't reach.
+            var webDb = DeveloperDb.FromWebConfig(p, _webConfig);
+            var dbName = webDb ?? (p.Name + _opts.Docker.DefaultDbNameSuffix);
+            var server = await ResolveLocalServerAsync(ct);
+            if (server is null)
+                return Result.Fail($"The shared SQL Server container '{_opts.Docker.ContainerName}' isn't running - start it and retry.");
+            reporter.Info(webDb is not null
+                ? $"Backing up the database the site uses (from web.config SiteSqlServer): [{dbName}]."
+                : $"web.config had no usable SiteSqlServer connection; using the default name [{dbName}].");
+
             var ensured = await _bacpac.EnsureAvailableAsync(reporter, ct);
             if (!ensured.Success) return ensured;
 
             Directory.CreateDirectory(p.BackupDirectory);
-            var name = $"developer_{DateTime.Now:yyyyMMdd_HHmmss}.bacpac";
+            // Encode the database name in the file name so a backup's contents are identifiable later
+            // (the import side picks a file from disk; the source DB isn't otherwise surfaced there).
+            var name = $"developer_{DeveloperDb.SanitizeForFileName(dbName)}_{DateTime.Now:yyyyMMdd_HHmmss}.bacpac";
             var dest = Path.Combine(p.BackupDirectory, name);
 
-            // The local DB lives in the Docker SQL Server published on localhost,<port>.
-            // DB_SERVER already carries that value; fall back to SQLSERVER_PORT / the default.
-            var server = cfg.GetValueOrDefault("DB_SERVER", "");
-            if (string.IsNullOrWhiteSpace(server))
-            {
-                var port = int.TryParse(cfg.GetValueOrDefault("SQLSERVER_PORT", ""), out var pp) ? pp : _opts.Docker.DefaultPort;
-                server = $"localhost,{port}";
-            }
-
-            reporter.Step($"Backing up [{dbName}]");
-            // Export a BACPAC via SqlPackage, connecting as sa (full read rights for the export).
+            reporter.Step($"Backing up [{dbName}] on {server}");
+            // Export a BACPAC via SqlPackage, connecting as the local Docker sa for full read rights
+            // (regardless of the limited login the site itself uses).
             var source = new SiteSqlConnection(server, dbName, "sa", _opts.Docker.SaPassword);
             var export = await _bacpac.ExportAsync(source, dest, reporter, ct);
             if (!export.Success) return export;
@@ -75,12 +109,25 @@ public sealed class ExportDatabaseUseCase
             return Result.Fail(ex.Message);
         }
     }
+
+    /// <summary>
+    /// The local Docker SQL Server endpoint to connect to as sa (localhost + the shared container's
+    /// currently-published port), or null when the container isn't running. We deliberately do NOT
+    /// fall back to the default port: with the container down there is no local DB to back up, and
+    /// blindly targeting 1433 could hit an unrelated SQL Server listening there.
+    /// </summary>
+    private async Task<string?> ResolveLocalServerAsync(CancellationToken ct)
+    {
+        var port = await _docker.GetPublishedPortAsync(_opts.Docker.ContainerName, ct);
+        return port is null ? null : $"localhost,{port}";
+    }
 }
 
 public sealed class ImportDatabaseUseCase
 {
     private readonly IProjectRepository _projects;
-    private readonly IEnvFileService _envFiles;
+    private readonly IWebConfigService _webConfig;
+    private readonly IDockerService _docker;
     private readonly ISqlServerService _sql;
     private readonly IBacpacService _bacpac;
     private readonly IRemoteSqlAdminService _remoteAdmin;
@@ -89,11 +136,11 @@ public sealed class ImportDatabaseUseCase
     private readonly ILogger<ImportDatabaseUseCase> _log;
 
     public ImportDatabaseUseCase(
-        IProjectRepository projects, IEnvFileService envFiles, ISqlServerService sql,
+        IProjectRepository projects, IWebConfigService webConfig, IDockerService docker, ISqlServerService sql,
         IBacpacService bacpac, IRemoteSqlAdminService remoteAdmin, IUserPrompt prompt,
         IOptions<AppOptions> opts, ILogger<ImportDatabaseUseCase> log)
     {
-        _projects = projects; _envFiles = envFiles; _sql = sql; _bacpac = bacpac;
+        _projects = projects; _webConfig = webConfig; _docker = docker; _sql = sql; _bacpac = bacpac;
         _remoteAdmin = remoteAdmin; _prompt = prompt; _opts = opts.Value; _log = log;
     }
 
@@ -120,18 +167,24 @@ public sealed class ImportDatabaseUseCase
     private async Task<Result> ImportDeveloperAsync(string projectName, DnnProject p, string backupFilePath,
         IProgressReporter reporter, CancellationToken ct)
     {
-        if (!await _prompt.ConfirmAsync($"Restore from {Path.GetFileName(backupFilePath)} (overwrites database)?", false, ct))
-            return Result.Fail("Aborted by user.");
-
-        var cfg = _envFiles.Read(p.DeveloperEnvFile);
+        // Restore into the database the site uses (web.config SiteSqlServer), falling back to the
+        // conventional {project}_dnndev name. This keeps backup and restore symmetric - otherwise a
+        // backup of DB 'A' could be restored into a differently-named DB 'B', leaving the live site DB
+        // untouched. The server is always the local Docker SQL Server (we connect as its sa).
+        var dbName = DeveloperDb.FromWebConfig(p, _webConfig) ?? (projectName + _opts.Docker.DefaultDbNameSuffix);
+        var port = await _docker.GetPublishedPortAsync(_opts.Docker.ContainerName, ct);
+        if (port is null)
+            return Result.Fail($"The shared SQL Server container '{_opts.Docker.ContainerName}' isn't running - start it and retry.");
         var db = new DatabaseConfig(
-            cfg.GetValueOrDefault("DB_SERVER", "localhost"),
-            cfg.GetValueOrDefault("DB_NAME", projectName + _opts.Docker.DefaultDbNameSuffix),
-            cfg.GetValueOrDefault("DB_USER", projectName + _opts.Docker.DefaultDbUserSuffix),
-            cfg.GetValueOrDefault("DB_PASSWORD", _opts.Docker.DefaultDbPassword),
+            $"localhost,{port.Value}",
+            dbName,
             _opts.Docker.Collation,
-            int.TryParse(cfg.GetValueOrDefault("SQLSERVER_PORT", ""), out var pp) ? pp : _opts.Docker.DefaultPort,
+            port.Value,
             p.BackupDirectory);
+
+        if (!await _prompt.ConfirmAsync(
+                $"Restore [{db.DatabaseName}] from {Path.GetFileName(backupFilePath)} (overwrites the database)?", false, ct))
+            return Result.Fail("Aborted by user.");
 
         reporter.Step($"Restoring [{db.DatabaseName}]");
 
@@ -140,23 +193,21 @@ public sealed class ImportDatabaseUseCase
             return await _sql.RestoreDatabaseLocalAsync(db, backupFilePath, ct);
 
         // .bacpac → SqlPackage import. Import always creates a fresh database, so drop any
-        // existing copy first (the user already confirmed overwriting), then remap the app login.
+        // existing copy first (the user already confirmed overwriting).
         var ensured = await _bacpac.EnsureAvailableAsync(reporter, ct);
         if (!ensured.Success) return ensured;
 
         var exists = await _sql.DatabaseExistsAsync(db.DatabaseName, ct);
         if (exists.Success && exists.Value)
         {
-            var drop = await _sql.DropDatabaseAndUserAsync(db, ct);
+            var drop = await _sql.DropDatabaseAsync(db.DatabaseName, ct);
             if (!drop.Success) return drop;
         }
 
-        var import = await _bacpac.ImportAsync(db.Server, "sa", _opts.Docker.SaPassword,
+        // The import creates the database; the site connects as the container sa, so there is no
+        // login/user to remap afterwards.
+        return await _bacpac.ImportAsync(db.Server, "sa", _opts.Docker.SaPassword,
             db.DatabaseName, backupFilePath, reporter, ct);
-        if (!import.Success) return import;
-
-        // Import created the DB; (re)create the login and map our app user as db_owner.
-        return await _sql.CreateDatabaseAndUserAsync(db, ct);
     }
 
     /// <summary>
@@ -167,20 +218,19 @@ public sealed class ImportDatabaseUseCase
     private async Task<Result> ImportProductionAsync(DnnProject p, string backupFilePath,
         IProgressReporter reporter, CancellationToken ct)
     {
-        if (!File.Exists(p.ProductionEnvFile))
-            return Result.Fail($"Production env file missing: {p.ProductionEnvFile}");
-
-        var cfg = _envFiles.Read(p.ProductionEnvFile);
-        var server = cfg.GetValueOrDefault("DB_SERVER", "");
-        var dbName = cfg.GetValueOrDefault("DB_NAME", "");
-        var user = cfg.GetValueOrDefault("DB_USER", "");
-        var pass = cfg.GetValueOrDefault("DB_PASSWORD", "");
-
-        if (string.IsNullOrWhiteSpace(server) || string.IsNullOrWhiteSpace(dbName))
-            return Result.Fail("Production DB_SERVER / DB_NAME are not set in the production env file.");
-        if (string.IsNullOrWhiteSpace(user) || string.IsNullOrWhiteSpace(pass))
-            return Result.Fail("Production DB_USER / DB_PASSWORD are not set. Edit the production env file with " +
-                               "your Azure SQL admin credentials (the login must be able to drop/create the database).");
+        // Production overwrite targets a remote (Azure) SQL Server. There is no stored env file any
+        // more, so prompt for the connection up front (the login must be able to drop/create the DB).
+        // Each prompt returns null on Esc/empty - bail immediately so cancelling the first field
+        // doesn't drag the user through the rest.
+        reporter.Info("Enter the production (Azure) SQL connection to overwrite (Esc to cancel).");
+        var server = (await _prompt.PromptTextAsync("Production SQL server (e.g. myserver.database.windows.net)", ct))?.Trim();
+        if (string.IsNullOrWhiteSpace(server)) return Result.Fail("Aborted by user.");
+        var dbName = (await _prompt.PromptTextAsync("Production database name", ct))?.Trim();
+        if (string.IsNullOrWhiteSpace(dbName)) return Result.Fail("Aborted by user.");
+        var user = (await _prompt.PromptTextAsync("Production SQL admin user", ct))?.Trim();
+        if (string.IsNullOrWhiteSpace(user)) return Result.Fail("Aborted by user.");
+        var pass = await _prompt.PromptTextAsync("Production SQL admin password", ct);
+        if (string.IsNullOrWhiteSpace(pass)) return Result.Fail("Aborted by user.");
 
         // Azure SQL can only be seeded from a BACPAC; a native .bak cannot be restored there.
         if (!backupFilePath.EndsWith(".bacpac", StringComparison.OrdinalIgnoreCase))

@@ -25,7 +25,7 @@ Docker, GitHub, SQL Server, file I/O and state into maintainable layers:
 │                     DnnManager.Infrastructure                       │
 │  IIS (Microsoft.Web.Administration), Docker CLI (Process),          │
 │  GitHub releases (HttpClient), SQL Server (sqlcmd in container),    │
-│  env-file & filesystem repository, prerequisite checks.             │
+│  web.config & filesystem repository, prerequisite checks.           │
 └──────────────────────────┬──────────────────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────────────────┐
@@ -64,7 +64,7 @@ DnnManager.NET/
     │   ├── Docker/              ← docker compose / docker exec via ProcessRunner
     │   ├── Sql/                 ← sqlcmd-in-container (no SqlClient dependency)
     │   ├── Github/              ← GitHub API + DNN package downloader
-    │   ├── Projects/            ← FS-backed project + env-file services
+    │   ├── Projects/            ← FS-backed project repository
     │   ├── Prereq/              ← Docker + IIS feature checks
     │   ├── Processes/           ← shared ProcessRunner
     │   └── DependencyInjection.cs
@@ -87,7 +87,7 @@ correct `src/<layer>` folder.
 | Decision | Why |
 |---|---|
 | **Clean Architecture (single project, layered folders)** | Use cases are testable without IIS/Docker; UI can be swapped (e.g. WPF) without touching business logic. Layers are enforced by namespace + folder convention. |
-| **All side-effects behind interfaces** | `IIisManager`, `IDockerService`, `ISqlServerService`, `IDnnReleaseService`, `IPrerequisiteChecker`, `IEnvFileService`, `IHttpConnectivityChecker`, `IUserPrompt`, `IProgressReporter`. Easy to mock in tests. |
+| **All side-effects behind interfaces** | `IIisManager`, `IDockerService`, `ISqlServerService`, `IDnnReleaseService`, `IPrerequisiteChecker`, `IWebConfigService`, `IHttpConnectivityChecker`, `IUserPrompt`, `IProgressReporter`. Easy to mock in tests. |
 | **`Result` / `Result<T>` instead of exceptions across layers** | Use-case outcomes are explicit; we still log and surface unexpected exceptions centrally. |
 | **`Microsoft.Extensions.Hosting` + `IOptions<AppOptions>`** | Standard DI, configuration binding (`appsettings.json` + `DNNMGR_*` env vars), structured logging via `Microsoft.Extensions.Logging`. |
 | **Custom TUI** | `ConsoleScreen` wraps `Console.SetCursorPosition` / `ForegroundColor` / `Clear`. `SelectableList<T>` and `ConfirmDialog` handle `ConsoleKey.UpArrow/DownArrow/LeftArrow/RightArrow/Enter/Escape` and 1-9 quick-select. |
@@ -281,7 +281,7 @@ message, no pause.
 | GitHub release lookup | [`Github/GitHubDnnReleaseService.cs`](src/DnnManager.Infrastructure/Github/GitHubDnnReleaseService.cs) |
 | IIS helpers | [`Iis/IisManager.cs`](src/DnnManager.Infrastructure/Iis/IisManager.cs) |
 | Docker / sqlcmd | [`Docker/DockerService.cs`](src/DnnManager.Infrastructure/Docker/DockerService.cs), [`Sql/SqlServerService.cs`](src/DnnManager.Infrastructure/Sql/SqlServerService.cs) |
-| `.env` / compose writers | [`Docker/DockerService.cs`](src/DnnManager.Infrastructure/Docker/DockerService.cs) (`DockerConfigWriter`), [`Projects/FileSystemProjectRepository.cs`](src/DnnManager.Infrastructure/Projects/FileSystemProjectRepository.cs) (`EnvFileService`) |
+| Shared SQL container | [`docker-compose.yml`](docker-compose.yml) (ships next to the app), brought up via [`Docker/DockerService.cs`](src/DnnManager.Infrastructure/Docker/DockerService.cs) (`ComposeUpAsync`) |
 
 ## Notes / limitations
 

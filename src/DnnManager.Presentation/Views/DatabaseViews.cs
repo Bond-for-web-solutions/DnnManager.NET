@@ -88,7 +88,7 @@ internal static class EnvironmentSelector
         {
             screen.Clear();
             Console.ForegroundColor = Theme.Error;
-            Console.WriteLine("\n  No configured projects with a docker workspace.");
+            Console.WriteLine("\n  No configured projects (none have a docker-compose.yml).");
             Console.ResetColor();
             Console.WriteLine("  Press any key…");
             ConsoleInput.Flush();

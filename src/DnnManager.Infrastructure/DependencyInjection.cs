@@ -18,10 +18,8 @@ public static class InfrastructureServiceCollectionExtensions
     {
         services.AddSingleton<ProcessRunner>();
         services.AddSingleton<IProjectRepository, FileSystemProjectRepository>();
-        services.AddSingleton<IEnvFileService, EnvFileService>();
         services.AddSingleton<IIisManager, IisManager>();
         services.AddSingleton<IDockerService, DockerService>();
-        services.AddSingleton<IDockerConfigWriter, DockerConfigWriter>();
         services.AddSingleton<ISqlServerService, SqlServerService>();
         services.AddSingleton<IPrerequisiteChecker, WindowsPrerequisiteChecker>();
         services.AddSingleton<IHttpConnectivityChecker, HttpConnectivityChecker>();
