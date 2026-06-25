@@ -24,6 +24,7 @@ public static class InfrastructureServiceCollectionExtensions
         services.AddSingleton<IPrerequisiteChecker, WindowsPrerequisiteChecker>();
         services.AddSingleton<IHttpConnectivityChecker, HttpConnectivityChecker>();
         services.AddSingleton<IProjectFileCopier, ProjectFileCopier>();
+        services.AddSingleton<IProjectScaffolder, ProjectScaffolder>();
         services.AddSingleton<IFtpBrowser, FtpBrowser>();
         // One combined store (connections.json) backs both FTP and SQL profiles.
         services.AddSingleton<ConnectionProfileStore>();

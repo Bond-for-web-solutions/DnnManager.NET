@@ -33,6 +33,7 @@ public sealed class CloneProjectUseCase
     private readonly AppOptions _opts;
     private readonly IProjectRepository _projects;
     private readonly IProjectFileCopier _copier;
+    private readonly IProjectScaffolder _scaffolder;
     private readonly IWebConfigService _webConfig;
     private readonly IRemoteSqlBackupService _remoteBackup;
     private readonly IBacpacService _bacpac;
@@ -47,6 +48,7 @@ public sealed class CloneProjectUseCase
         IOptions<AppOptions> opts,
         IProjectRepository projects,
         IProjectFileCopier copier,
+        IProjectScaffolder scaffolder,
         IWebConfigService webConfig,
         IRemoteSqlBackupService remoteBackup,
         IBacpacService bacpac,
@@ -60,6 +62,7 @@ public sealed class CloneProjectUseCase
         _opts = opts.Value;
         _projects = projects;
         _copier = copier;
+        _scaffolder = scaffolder;
         _webConfig = webConfig;
         _remoteBackup = remoteBackup;
         _bacpac = bacpac;
@@ -105,6 +108,14 @@ public sealed class CloneProjectUseCase
                 var stripped = _webConfig.RemoveRewriteRules(siteWebConfig);
                 if (stripped.Success) reporter.Info("Removed URL Rewrite rules (not needed locally).");
             }
+
+            // Lay down a DNN-tuned .gitignore so the cloned project is ready to commit. Skips silently
+            // when the source already shipped one, so a site's own .gitignore is preserved.
+            var gitignore = _scaffolder.EnsureGitignore(project.ProjectDirectory);
+            if (gitignore.Success)
+                reporter.Info("Project .gitignore ready.");
+            else
+                reporter.Info($"Could not write .gitignore: {gitignore.Error}");
 
             // Seeding restores the source DB into the local Docker SQL container, so it needs Docker.
             // If Docker is absent we skip seeding (like a files-only clone) instead of hard-failing.

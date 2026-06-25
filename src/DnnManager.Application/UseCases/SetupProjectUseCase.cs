@@ -19,6 +19,7 @@ public sealed class SetupProjectUseCase
     private readonly IProjectRepository _projects;
     private readonly IDnnReleaseService _releases;
     private readonly IDnnPackageInstaller _installer;
+    private readonly IProjectScaffolder _scaffolder;
     private readonly IIisManager _iis;
     private readonly IDockerService _docker;
     private readonly ISqlServerService _sql;
@@ -32,6 +33,7 @@ public sealed class SetupProjectUseCase
         IProjectRepository projects,
         IDnnReleaseService releases,
         IDnnPackageInstaller installer,
+        IProjectScaffolder scaffolder,
         IIisManager iis,
         IDockerService docker,
         ISqlServerService sql,
@@ -44,6 +46,7 @@ public sealed class SetupProjectUseCase
         _projects = projects;
         _releases = releases;
         _installer = installer;
+        _scaffolder = scaffolder;
         _iis = iis;
         _docker = docker;
         _sql = sql;
@@ -96,6 +99,14 @@ public sealed class SetupProjectUseCase
             reporter.Step("Step 4: Download & extract");
             var extract = await _installer.DownloadAndExtractAsync(release, project.ProjectDirectory, reporter, ct);
             if (!extract.Success) return extract;
+
+            // Drop a DNN-tuned .gitignore next to the freshly extracted site so the project is ready
+            // to commit without dragging in runtime data, caches, logs or portal uploads.
+            var gitignore = _scaffolder.EnsureGitignore(project.ProjectDirectory);
+            if (gitignore.Success)
+                reporter.Info("Project .gitignore ready.");
+            else
+                reporter.Info($"Could not write .gitignore: {gitignore.Error}");
 
             reporter.Step("Step 5: IIS website");
             var siteCreated = false;

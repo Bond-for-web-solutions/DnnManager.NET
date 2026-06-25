@@ -77,6 +77,26 @@
                 "panel": "shared",
                 "clear": true
             }
+        },
+        {
+            "label": "zip (DnnManager.zip)",
+            "type": "process",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "Compress-Archive -Path '${workspaceFolder}/publish/*' -DestinationPath '${workspaceFolder}/DnnManager.zip' -Force"
+            ],
+            "dependsOn": "publish (single self-contained win-x64)",
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
         }
     ]
 }
